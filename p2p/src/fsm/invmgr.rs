@@ -21,8 +21,8 @@
 //!
 use std::collections::BTreeMap;
 
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
-use nakamoto_common::bitcoin::network::{constants::ServiceFlags, message_blockdata::Inventory};
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::{message_blockdata::Inventory, ServiceFlags};
 use nakamoto_common::bitcoin::{Block, BlockHash, Transaction, Txid, Wtxid};
 
 // TODO: Timeout should be configurable
@@ -180,7 +180,7 @@ impl<C: Clock> InventoryManager<C> {
                     self.received_block(&from, block.clone(), tree);
                 }
                 NetworkMessage::GetData(invs) => {
-                    self.received_getdata(from, invs);
+                    self.received_getdata(from, &invs);
                     // TODO: (*self.hooks.on_getdata)(addr, invs, &self.outbox);
                 }
                 _ => {}
@@ -200,7 +200,7 @@ impl<C: Clock> InventoryManager<C> {
         // Add existing inventories to this peer's outbox so that they are announced.
         let mut outbox = HashMap::with_hasher(self.rng.clone().into());
         for (wtxid, tx) in self.mempool.iter() {
-            outbox.insert(*wtxid, tx.txid());
+            outbox.insert(*wtxid, tx.compute_txid());
         }
         self.schedule_tick();
         self.peers.insert(
@@ -225,7 +225,7 @@ impl<C: Clock> InventoryManager<C> {
             for transaction in transactions {
                 self.announce(transaction.clone());
                 self.outbox.event(Event::TxStatusChanged {
-                    txid: transaction.txid(),
+                    txid: transaction.compute_txid(),
                     status: TxStatus::Reverted { transaction },
                 });
             }
@@ -234,7 +234,10 @@ impl<C: Clock> InventoryManager<C> {
 
     /// Lookup a submitted transaction in the local mempool.
     pub fn get_submitted_tx(&mut self, txid: &Txid) -> Option<Transaction> {
-        self.mempool.values().find(|tx| tx.txid() == *txid).cloned()
+        self.mempool
+            .values()
+            .find(|tx| tx.compute_txid() == *txid)
+            .cloned()
     }
 
     /// Called when we receive a tick.
@@ -280,12 +283,12 @@ impl<C: Clock> InventoryManager<C> {
                 let mut invs = Vec::with_capacity(peer.outbox.len());
                 if peer.wtxidrelay {
                     for wtxid in peer.outbox.keys() {
-                        invs.push(Inventory::WTx(self.mempool[wtxid].wtxid()));
+                        invs.push(Inventory::WTx(self.mempool[wtxid].compute_wtxid()));
                     }
                 } else {
                     // TODO: Should we send a WitnessTransaction?
                     for wtxid in peer.outbox.keys() {
-                        invs.push(Inventory::Transaction(self.mempool[wtxid].txid()));
+                        invs.push(Inventory::Transaction(self.mempool[wtxid].compute_txid()));
                     }
                 }
                 self.outbox.inv(*addr, invs);
@@ -334,8 +337,8 @@ impl<C: Clock> InventoryManager<C> {
                 // than witness inventories, but the `bitcoin` crate doesn't allow us to
                 // omit the witness data, hence we treat them equally here.
                 Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
-                    if let Some(tx) = self.mempool.values().find(|tx| tx.txid() == *txid) {
-                        let wtxid = tx.wtxid();
+                    if let Some(tx) = self.mempool.values().find(|tx| tx.compute_txid() == *txid) {
+                        let wtxid = tx.compute_wtxid();
                         debug_assert!(self.mempool.contains_key(&wtxid));
                         self.outbox.tx(addr, tx.clone());
 
@@ -440,11 +443,11 @@ impl<C: Clock> InventoryManager<C> {
             let hash = block.block_hash();
 
             for tx in &block.txdata {
-                let wtxid = tx.wtxid();
+                let wtxid = tx.compute_wtxid();
 
                 // Attempt to remove confirmed transaction from mempool.
                 if let Some(transaction) = self.mempool.remove(&wtxid) {
-                    confirmed.push(tx.txid());
+                    confirmed.push(tx.compute_txid());
 
                     // Transactions that have been confirmed no longer need to be announced.
                     for peer in self.peers.values_mut() {
@@ -457,7 +460,7 @@ impl<C: Clock> InventoryManager<C> {
                         .push(transaction.clone());
 
                     self.outbox.event(Event::TxStatusChanged {
-                        txid: transaction.txid(),
+                        txid: transaction.compute_txid(),
                         status: TxStatus::Confirmed {
                             block: hash,
                             height,
@@ -482,8 +485,8 @@ impl<C: Clock> InventoryManager<C> {
         // All peers we are sending inventories to.
         let mut addrs = Vec::new();
 
-        let txid = tx.txid();
-        let wtxid = tx.wtxid();
+        let txid = tx.compute_txid();
+        let wtxid = tx.compute_wtxid();
 
         // Insert transaction into the peer outboxes and keep a local copy for re-broadcasting later.
         self.mempool.insert(wtxid, tx);
@@ -522,7 +525,7 @@ mod tests {
     use crate::fsm::network::Network;
     use crate::fsm::output;
 
-    use nakamoto_common::bitcoin::network::message::NetworkMessage;
+    use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
     use nakamoto_common::block::time::RefClock;
     use nakamoto_common::block::tree::BlockTree as _;
     use nakamoto_common::collections::HashSet;
@@ -709,7 +712,7 @@ mod tests {
             .find(|e| matches!(e, Event::PeerTimedOut { addr } if addr == &remote))
             .expect("Peer times out");
 
-        assert!(invmgr.contains(&tx.wtxid()));
+        assert!(invmgr.contains(&tx.compute_wtxid()));
         assert!(invmgr.peers.is_empty());
     }
 
@@ -742,13 +745,13 @@ mod tests {
         invmgr.get_block(main_block1.block_hash());
         invmgr.received_block(&remote, main_block1, &tree);
 
-        assert!(!invmgr.contains(&tx.wtxid()));
+        assert!(!invmgr.contains(&tx.compute_wtxid()));
 
         events(invmgr.outbox.drain())
             .find(|e| {
                 matches! {
                     e, Event::TxStatusChanged { txid, status: TxStatus::Confirmed { .. } }
-                    if *txid == tx.txid()
+                    if *txid == tx.compute_txid()
                 }
             })
             .unwrap();
@@ -760,13 +763,13 @@ mod tests {
         .unwrap();
 
         invmgr.block_reverted(height);
-        assert!(invmgr.contains(&tx.wtxid()));
+        assert!(invmgr.contains(&tx.compute_wtxid()));
 
         events(invmgr.outbox.drain())
             .find(|e| {
                 matches! {
                     e, Event::TxStatusChanged { txid, status: TxStatus::Reverted { .. } }
-                    if *txid == tx.txid()
+                    if *txid == tx.compute_txid()
                 }
             })
             .unwrap();
@@ -778,7 +781,7 @@ mod tests {
             .find(|e| {
                 matches! {
                     e, Event::TxStatusChanged { txid, status: TxStatus::Confirmed { block, .. } }
-                    if *txid == tx.txid() && block == &fork_block1.block_hash()
+                    if *txid == tx.compute_txid() && block == &fork_block1.block_hash()
                 }
             })
             .unwrap();
@@ -837,7 +840,7 @@ mod tests {
         invmgr.peer_negotiated(remote, ServiceFlags::NETWORK, true, true);
         invmgr.announce(tx.clone());
 
-        invmgr.received_getdata(remote, &[Inventory::Transaction(tx.txid())]);
+        invmgr.received_getdata(remote, &[Inventory::Transaction(tx.compute_txid())]);
         let tr = output::test::messages_from(&mut invmgr.outbox, &remote)
             .filter_map(|m| {
                 if let NetworkMessage::Tx(tr) = m {
@@ -848,9 +851,9 @@ mod tests {
             })
             .next()
             .unwrap();
-        assert_eq!(tr.txid(), tx.txid());
+        assert_eq!(tr.compute_txid(), tx.compute_txid());
 
-        invmgr.received_getdata(remote, &[Inventory::WTx(tx.wtxid())]);
+        invmgr.received_getdata(remote, &[Inventory::WTx(tx.compute_wtxid())]);
         let tr = output::test::messages_from(&mut invmgr.outbox, &remote)
             .filter_map(|m| {
                 if let NetworkMessage::Tx(tr) = m {
@@ -861,6 +864,6 @@ mod tests {
             })
             .next()
             .unwrap();
-        assert_eq!(tr.wtxid(), tx.wtxid());
+        assert_eq!(tr.compute_wtxid(), tx.compute_wtxid());
     }
 }

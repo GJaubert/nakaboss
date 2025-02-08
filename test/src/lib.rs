@@ -11,19 +11,19 @@ use nakamoto_common::bitcoin;
 use nakamoto_common::bitcoin::blockdata::constants;
 use nakamoto_common::bitcoin::consensus::encode::Decodable;
 
-use nakamoto_common::block::BlockHeader;
+use nakamoto_common::block::Header;
 use nakamoto_common::nonempty::NonEmpty;
 
 pub use fastrand;
 
-pub static BITCOIN_HEADERS: Lazy<NonEmpty<BlockHeader>> = Lazy::new(|| {
+pub static BITCOIN_HEADERS: Lazy<NonEmpty<Header>> = Lazy::new(|| {
     let genesis = constants::genesis_block(bitcoin::Network::Bitcoin).header;
     let mut f = File::open(&*self::headers::PATH).unwrap();
     let mut buf = [0; 80];
     let mut headers = NonEmpty::new(genesis);
 
     while f.read_exact(&mut buf).is_ok() {
-        let header = BlockHeader::consensus_decode(&mut buf.as_slice()).unwrap();
+        let header = Header::consensus_decode(&mut buf.as_slice()).unwrap();
         headers.push(header);
     }
     headers

@@ -1,15 +1,14 @@
 //! Bitcoin peer network. Eg. *Mainnet*.
+
 use std::str::FromStr;
 
-use bitcoin::blockdata::block::{Block, BlockHeader};
+use crate::block::Height;
+use bitcoin::blockdata::block::{Block, Header};
 use bitcoin::consensus::params::Params;
 use bitcoin::hash_types::BlockHash;
-use bitcoin::hashes::hex::FromHex;
-use bitcoin::network::constants::ServiceFlags;
-
-use bitcoin_hashes::sha256d;
-
-use crate::block::Height;
+use bitcoin::hashes::sha256d;
+use bitcoin::network;
+use bitcoin::p2p::ServiceFlags;
 
 /// Peer services supported by nakamoto.
 #[derive(Debug, Copy, Clone, Default)]
@@ -79,8 +78,11 @@ impl From<bitcoin::Network> for Network {
         match value {
             bitcoin::Network::Bitcoin => Self::Mainnet,
             bitcoin::Network::Testnet => Self::Testnet,
+            bitcoin::Network::Testnet4 => Self::Testnet,
             bitcoin::Network::Signet => Self::Signet,
             bitcoin::Network::Regtest => Self::Regtest,
+            // TODO: handle better the 'other' case
+            _ => Self::Testnet,
         }
     }
 }
@@ -109,7 +111,7 @@ impl Network {
         .iter()
         .cloned()
         .map(|(height, hash)| {
-            let hash = BlockHash::from_hex(hash).unwrap();
+            let hash = BlockHash::from_str(hash).unwrap();
             (height, hash)
         });
 
@@ -164,21 +166,21 @@ impl Network {
     ///
     /// assert_eq!(network.genesis_hash(), genesis.block_hash());
     /// ```
-    pub fn genesis(&self) -> BlockHeader {
+    pub fn genesis(&self) -> Header {
         self.genesis_block().header
     }
 
     /// Get the genesis block.
-    pub fn genesis_block(&self) -> Block {
+    pub fn genesis_block(self) -> Block {
         use bitcoin::blockdata::constants;
 
-        constants::genesis_block((*self).into())
+        let network = bitcoin::Network::from(self);
+        constants::genesis_block(<network::Network as Into<Params>>::into(network))
     }
 
     /// Get the hash of the genesis block of this network.
     pub fn genesis_hash(&self) -> BlockHash {
         use crate::block::genesis;
-        use bitcoin_hashes::Hash;
 
         let hash = match self {
             Self::Mainnet => genesis::MAINNET,
@@ -186,10 +188,7 @@ impl Network {
             Self::Regtest => genesis::REGTEST,
             Self::Signet => genesis::SIGNET,
         };
-        BlockHash::from_hash(
-            sha256d::Hash::from_slice(hash)
-                .expect("the genesis hash has the right number of bytes"),
-        )
+        BlockHash::from_raw_hash(*sha256d::Hash::from_bytes_ref(hash))
     }
 
     /// Get the consensus parameters for this network.
@@ -199,6 +198,6 @@ impl Network {
 
     /// Get the network magic number for this network.
     pub fn magic(&self) -> u32 {
-        bitcoin::Network::from(*self).magic()
+        u32::from_be_bytes(bitcoin::Network::from(*self).magic().to_bytes())
     }
 }

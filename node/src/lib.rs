@@ -20,6 +20,7 @@ pub fn run(
     root: Option<PathBuf>,
     domains: &[Domain],
     network: Network,
+    p2p_v2: bool,
 ) -> Result<(), Error> {
     let mut cfg = Config {
         network,

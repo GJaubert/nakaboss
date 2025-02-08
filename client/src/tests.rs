@@ -9,7 +9,7 @@ use std::time;
 use nakamoto_chain::block::cache::BlockCache;
 use nakamoto_chain::block::store;
 use nakamoto_chain::filter::cache::FilterCache;
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
+use nakamoto_common::bitcoin::p2p::ServiceFlags;
 use nakamoto_common::block::time::AdjustedTime;
 use nakamoto_common::block::Height;
 use nakamoto_common::network::Services;

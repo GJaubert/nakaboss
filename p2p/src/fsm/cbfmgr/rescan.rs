@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
-use nakamoto_common::bitcoin::util::bip158;
+use derivative::Derivative;
+
+use nakamoto_common::bitcoin::bip158;
 use nakamoto_common::bitcoin::{Script, Txid};
 use nakamoto_common::block::filter::BlockFilter;
 use nakamoto_common::block::tree::BlockReader;
@@ -13,7 +15,8 @@ use nakamoto_common::collections::{HashMap, HashSet};
 use super::{Event, FilterCache, HeightIterator, MAX_MESSAGE_CFILTERS};
 
 /// Filter (re)scan state.
-#[derive(Debug, Default)]
+#[derive(Derivative)]
+#[derivative(Default, Debug)]
 pub struct Rescan {
     /// Whether a rescan is currently in progress.
     pub active: bool,
@@ -26,11 +29,10 @@ pub struct Rescan {
     pub end: Option<Height>,
     /// Filter cache.
     pub cache: FilterCache<Rc<BlockFilter>>,
-    /// Addresses and outpoints to watch for.
-    pub watch: HashSet<Script>,
+    #[derivative(Default(value = "HashSet::default()"))]
+    pub watch: HashSet<Box<Script>>,
     /// Transactions to watch for.
-    pub transactions: HashMap<Txid, HashSet<Script>>,
-
+    pub transactions: HashMap<Txid, HashSet<Box<Script>>>,
     /// Filters requested and remaining to download.
     requested: BTreeSet<Height>,
     /// Received filters waiting to be matched.
@@ -53,7 +55,7 @@ impl Rescan {
         &mut self,
         start: Height,
         end: Option<Height>,
-        watch: impl IntoIterator<Item = Script>,
+        watch: impl IntoIterator<Item = Box<Script>>,
     ) {
         self.active = true;
         self.start = start;

@@ -1,7 +1,6 @@
 //! Message stream utilities.
-use std::io;
-
 use nakamoto_common::bitcoin::consensus::{encode, Decodable};
+use nakamoto_common::bitcoin::io::ErrorKind;
 
 /// Message stream decoder.
 ///
@@ -33,9 +32,7 @@ impl Decoder {
                 Ok(Some(msg))
             }
 
-            Err(encode::Error::Io(ref err)) if err.kind() == io::ErrorKind::UnexpectedEof => {
-                Ok(None)
-            }
+            Err(encode::Error::Io(ref err)) if err.kind() == ErrorKind::UnexpectedEof => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -44,7 +41,8 @@ impl Decoder {
 #[cfg(test)]
 mod test {
     use super::*;
-    use nakamoto_common::bitcoin::network::message::{NetworkMessage, RawNetworkMessage};
+    use nakamoto_common::bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+    use nakamoto_common::bitcoin::p2p::Magic;
     use quickcheck_macros::quickcheck;
 
     const MSG_VERACK: [u8; 24] = [
@@ -81,17 +79,17 @@ mod test {
         assert_eq!(msgs.len(), 2);
         assert_eq!(
             msgs[0],
-            RawNetworkMessage {
-                magic: 3652501241,
-                payload: NetworkMessage::Verack
-            }
+            RawNetworkMessage::new(
+                Magic::from_bytes(3652501241u32.to_le_bytes()),
+                NetworkMessage::Verack
+            )
         );
         assert_eq!(
             msgs[1],
-            RawNetworkMessage {
-                magic: 3652501241,
-                payload: NetworkMessage::Ping(100),
-            }
+            RawNetworkMessage::new(
+                Magic::from_bytes(3652501241u32.to_le_bytes()),
+                NetworkMessage::Ping(100)
+            )
         );
     }
 }

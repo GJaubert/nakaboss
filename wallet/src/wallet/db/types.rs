@@ -1,5 +1,6 @@
 use nakamoto_common::bitcoin::Address;
 use sqlite as sql;
+use std::str::FromStr;
 
 use super::Error;
 
@@ -70,12 +71,11 @@ impl<'a> TryFrom<&'a sql::Row> for AddressRecord {
     type Error = Error;
 
     fn try_from(row: &'a sql::Row) -> Result<Self, Self::Error> {
+        // TODO: unsafe assuming of checked
         Ok(Self {
-            address: row
-                .get::<String, _>(0)
-                .as_str()
-                .parse()
-                .map_err(|_| Error::Decoding("address"))?,
+            address: Address::from_str(row.get::<String, _>(0).as_str())
+                .map_err(|_| Error::Decoding("address"))?
+                .assume_checked(),
             index: row.get::<i64, _>(1) as usize,
             label: row.get(2),
             received: row.get::<i64, _>(3) as u64,

@@ -18,15 +18,15 @@ use nakamoto_chain::filter::cache::FilterCache;
 use nakamoto_chain::filter::cache::StoredHeader;
 use nakamoto_chain::{block::cache::BlockCache, filter::BlockFilter};
 
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
-use nakamoto_common::bitcoin::network::Address;
-use nakamoto_common::bitcoin::util::uint::Uint256;
+use nakamoto_common::bitcoin::p2p::ServiceFlags;
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::Address;
+use nakamoto_common::bitcoin_num::uint::Uint256;
 use nakamoto_common::bitcoin::Txid;
 use nakamoto_common::block::store::{Genesis as _, Store as _};
 use nakamoto_common::block::time::{AdjustedTime, RefClock};
 use nakamoto_common::block::tree::{self, BlockReader, ImportResult};
-use nakamoto_common::block::{BlockHash, BlockHeader, Height, Transaction};
+use nakamoto_common::block::{BlockHash, Header, Height, Transaction};
 use nakamoto_common::nonempty::NonEmpty;
 use nakamoto_common::p2p::peer::{Source, Store as _};
 use nakamoto_p2p::fsm;
@@ -165,7 +165,7 @@ where
 /// Runs a pre-loaded client.
 pub struct ClientRunner<R> {
     service: Service<
-        BlockCache<store::File<BlockHeader>>,
+        BlockCache<store::File<Header>>,
         FilterCache<store::File<StoredHeader>>,
         peer::Cache,
         RefClock<AdjustedTime<net::SocketAddr>>,
@@ -473,21 +473,21 @@ impl<W: Waker> Handle<W> {
 }
 
 impl<W: Waker> handle::Handle for Handle<W> {
-    fn get_tip(&self) -> Result<(Height, BlockHeader, Uint256), handle::Error> {
-        let (transmit, receive) = chan::bounded::<(Height, BlockHeader, Uint256)>(1);
+    fn get_tip(&self) -> Result<(Height, Header, Uint256), handle::Error> {
+        let (transmit, receive) = chan::bounded::<(Height, Header, Uint256)>(1);
         self._command(Command::GetTip(transmit))?;
 
         Ok(receive.recv()?)
     }
 
-    fn get_block(&self, hash: &BlockHash) -> Result<Option<(Height, BlockHeader)>, handle::Error> {
+    fn get_block(&self, hash: &BlockHash) -> Result<Option<(Height, Header)>, handle::Error> {
         let (transmit, receive) = chan::bounded(1);
         self._command(Command::GetBlockByHash(*hash, transmit))?;
 
         Ok(receive.recv()?)
     }
 
-    fn get_block_by_height(&self, height: Height) -> Result<Option<BlockHeader>, handle::Error> {
+    fn get_block_by_height(&self, height: Height) -> Result<Option<Header>, handle::Error> {
         let (sender, recvr) = chan::bounded(1);
         self._command(Command::GetBlockByHeight(height, sender))?;
 
@@ -508,7 +508,7 @@ impl<W: Waker> handle::Handle for Handle<W> {
     fn find_branch(
         &self,
         to: &BlockHash,
-    ) -> Result<Option<(Height, NonEmpty<BlockHeader>)>, handle::Error> {
+    ) -> Result<Option<(Height, NonEmpty<Header>)>, handle::Error> {
         let to = *to;
         let (transmit, receive) = chan::bounded(1);
 
@@ -602,22 +602,6 @@ impl<W: Waker> handle::Handle for Handle<W> {
         Ok(())
     }
 
-    fn import_headers(
-        &self,
-        headers: Vec<BlockHeader>,
-    ) -> Result<Result<ImportResult, tree::Error>, handle::Error> {
-        let (transmit, receive) = chan::bounded::<Result<ImportResult, tree::Error>>(1);
-        self.command(Command::ImportHeaders(headers, transmit))?;
-
-        Ok(receive.recv()?)
-    }
-
-    fn import_addresses(&self, addrs: Vec<Address>) -> Result<(), handle::Error> {
-        self.command(Command::ImportAddresses(addrs))?;
-
-        Ok(())
-    }
-
     fn submit_transaction(
         &self,
         tx: Transaction,
@@ -632,6 +616,22 @@ impl<W: Waker> handle::Handle for Handle<W> {
         let (transmit, receive) = chan::bounded::<Option<Transaction>>(1);
         self.command(Command::GetSubmittedTransaction(txid.to_owned(), transmit))?;
         Ok(receive.recv()?)
+    }
+
+    fn import_headers(
+        &self,
+        headers: Vec<Header>,
+    ) -> Result<Result<ImportResult, tree::Error>, handle::Error> {
+        let (transmit, receive) = chan::bounded::<Result<ImportResult, tree::Error>>(1);
+        self.command(Command::ImportHeaders(headers, transmit))?;
+
+        Ok(receive.recv()?)
+    }
+
+    fn import_addresses(&self, addrs: Vec<Address>) -> Result<(), handle::Error> {
+        self.command(Command::ImportAddresses(addrs))?;
+
+        Ok(())
     }
 
     fn wait<F, T>(&self, f: F) -> Result<T, handle::Error>

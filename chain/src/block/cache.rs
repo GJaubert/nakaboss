@@ -13,20 +13,20 @@ use std::ops::ControlFlow;
 
 use nakamoto_common as common;
 use nakamoto_common::bitcoin;
-use nakamoto_common::bitcoin::blockdata::block::BlockHeader;
+use nakamoto_common::bitcoin::blockdata::block::Header as BitcoinBlockHeader;
 use nakamoto_common::bitcoin::consensus::params::Params;
 use nakamoto_common::bitcoin::hash_types::BlockHash;
-use nakamoto_common::bitcoin::network::constants::Network;
-use nakamoto_common::bitcoin::util::BitArray;
-
-use nakamoto_common::bitcoin::util::uint::Uint256;
+use nakamoto_common::bitcoin::network::Network;
+use nakamoto_common::bitcoin::{CompactTarget, Target};
+use nakamoto_common::bitcoin_num::uint::Uint256;
+use nakamoto_common::bitcoin_num::util::BitArray;
 use nakamoto_common::block::tree::{self, BlockReader, BlockTree, Branch, Error, ImportResult};
 use nakamoto_common::block::{
     self,
     iter::Iter,
     store::Store,
     time::{self, Clock},
-    Bits, BlockTime, Height, Work,
+    Bits, BlockTime, Header, Height, Work,
 };
 use nakamoto_common::nonempty::NonEmpty;
 
@@ -34,7 +34,7 @@ use nakamoto_common::nonempty::NonEmpty;
 #[derive(Debug, Clone, Copy)]
 struct CachedBlock {
     pub height: Height,
-    pub header: BlockHeader,
+    pub header: BitcoinBlockHeader,
 }
 
 impl CachedBlock {
@@ -44,7 +44,7 @@ impl CachedBlock {
 }
 
 impl std::ops::Deref for CachedBlock {
-    type Target = BlockHeader;
+    type Target = BitcoinBlockHeader;
 
     fn deref(&self) -> &Self::Target {
         &self.header
@@ -53,7 +53,7 @@ impl std::ops::Deref for CachedBlock {
 
 impl tree::Header for CachedBlock {
     fn work(&self) -> Work {
-        self.header.work()
+        Uint256::from_be_bytes(self.header.work().to_be_bytes())
     }
 }
 
@@ -61,9 +61,9 @@ impl tree::Header for CachedBlock {
 #[derive(Debug)]
 struct Candidate {
     tip: BlockHash,
-    headers: Vec<BlockHeader>,
+    headers: Vec<BitcoinBlockHeader>,
     fork_height: Height,
-    fork_header: BlockHeader,
+    fork_header: BitcoinBlockHeader,
 }
 
 /// An implementation of [`BlockTree`] using a generic storage backend.
@@ -72,7 +72,7 @@ struct Candidate {
 pub struct BlockCache<S: Store> {
     chain: NonEmpty<CachedBlock>,
     headers: HashMap<BlockHash, Height>,
-    orphans: HashMap<BlockHash, BlockHeader>,
+    orphans: HashMap<BlockHash, BitcoinBlockHeader>,
     checkpoints: BTreeMap<Height, BlockHash>,
     params: Params,
     /// Total cumulative work on the active chain.
@@ -80,7 +80,7 @@ pub struct BlockCache<S: Store> {
     store: S,
 }
 
-impl<S: Store<Header = BlockHeader>> BlockCache<S> {
+impl<S: Store<Header = BitcoinBlockHeader>> BlockCache<S> {
     /// Create a new `BlockCache` from a `Store`, consensus parameters, and checkpoints.
     pub fn new(
         store: S,
@@ -91,7 +91,7 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
         let length = store.len()?;
         let orphans = HashMap::new();
         let checkpoints = checkpoints.iter().cloned().collect();
-        let chainwork = genesis.work();
+        let chainwork: Uint256 = Uint256::from_be_bytes(genesis.work().to_be_bytes());
         let chain = NonEmpty::from((
             CachedBlock {
                 height: 0,
@@ -139,7 +139,7 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
             let (height, header) = result?;
 
             self.chain.push(CachedBlock { height, header });
-            self.chainwork = self.chainwork + header.work();
+            self.chainwork = self.chainwork + Uint256::from_be_bytes(header.work().to_be_bytes());
 
             if progress(height).is_break() {
                 return Err(Error::Interrupted);
@@ -196,7 +196,7 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
     /// Panics if height is `0`.
     ///
     pub fn median_time_past(&self, height: Height) -> BlockTime {
-        assert!(height != 0, "height must be > 0");
+        assert_ne!(height, 0, "height must be > 0");
 
         let mut times = [0; time::MEDIAN_TIME_SPAN as usize];
 
@@ -216,11 +216,7 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
 
     /// Import a block into the tree. Performs header validation. This function may trigger
     /// a chain re-org.
-    fn import_block(
-        &mut self,
-        header: BlockHeader,
-        clock: &impl Clock,
-    ) -> Result<ImportResult, Error> {
+    fn import_block(&mut self, header: Header, clock: &impl Clock) -> Result<ImportResult, Error> {
         let hash = header.block_hash();
         let tip = self.chain.last();
         let best = tip.hash();
@@ -240,17 +236,17 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
         //
         // We do this because it's cheap to verify and prevents flooding attacks.
         let target = header.target();
-        match header.validate_pow(&target) {
+        match header.validate_pow(target) {
             Ok(_) => {
-                let limit = self.params.pow_limit;
+                let limit = self.params.max_attainable_target;
                 if target > limit {
                     return Err(Error::InvalidBlockTarget(target, limit));
                 }
             }
-            Err(bitcoin::util::Error::BlockBadProofOfWork) => {
+            Err(bitcoin::block::ValidationError::BadProofOfWork) => {
                 return Err(Error::InvalidBlockPoW);
             }
-            Err(bitcoin::util::Error::BlockBadTarget) => unreachable! {
+            Err(bitcoin::block::ValidationError::BadTarget) => unreachable! {
                 // The only way to get a 'bad target' error is to pass a different target
                 // than the one specified in the header.
             },
@@ -440,7 +436,7 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
     fn validate(
         &self,
         tip: &CachedBlock,
-        header: &BlockHeader,
+        header: &Header,
         clock: &impl Clock,
     ) -> Result<(), Error> {
         assert_eq!(tip.hash(), header.prev_blockhash);
@@ -454,16 +450,17 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
                 self.next_min_difficulty_target(&self.params)
             }
         } else {
-            self.next_difficulty_target(tip.height, tip.time, tip.target(), &self.params)
+            self.next_difficulty_target(tip.height, tip.time, &tip.target(), &self.params)
         };
 
-        let target = BlockHeader::u256_from_compact_target(compact_target);
+        let compact_target = CompactTarget::from_consensus(compact_target);
+        let target = Target::from_compact(compact_target);
 
-        match header.validate_pow(&target) {
-            Err(bitcoin::util::Error::BlockBadProofOfWork) => {
+        match header.validate_pow(target) {
+            Err(bitcoin::block::ValidationError::BadProofOfWork) => {
                 return Err(Error::InvalidBlockPoW);
             }
-            Err(bitcoin::util::Error::BlockBadTarget) => {
+            Err(bitcoin::block::ValidationError::BadTarget) => {
                 return Err(Error::InvalidBlockTarget(header.target(), target));
             }
             Err(_) => unreachable!(),
@@ -501,23 +498,23 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
         let pow_limit_bits = block::pow_limit_bits(&params.network);
 
         for (height, header) in self.iter().rev() {
-            if header.bits != pow_limit_bits
+            if header.bits.to_consensus() != pow_limit_bits
                 || height % self.params.difficulty_adjustment_interval() == 0
             {
-                return header.bits;
+                return header.bits.to_consensus();
             }
         }
         pow_limit_bits
     }
 
     /// Rollback active chain to the given height. Returns the list of rolled-back headers.
-    fn rollback(&mut self, height: Height) -> Result<Vec<(Height, BlockHeader)>, Error> {
+    fn rollback(&mut self, height: Height) -> Result<Vec<(Height, Header)>, Error> {
         let mut stale = Vec::new();
 
         for (block, height) in self.chain.tail.drain(height as usize..).zip(height + 1..) {
             stale.push((height, block.header));
 
-            self.chainwork = self.chainwork - block.work();
+            self.chainwork = self.chainwork - Uint256::from_be_bytes(block.work().to_be_bytes());
             self.headers.remove(&block.hash());
             self.orphans.insert(block.hash(), block.header);
         }
@@ -527,7 +524,7 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
     }
 
     /// Activate a fork candidate. Returns the list of rolled-back (stale) headers.
-    fn switch_to_fork(&mut self, branch: &Candidate) -> Result<Vec<(Height, BlockHeader)>, Error> {
+    fn switch_to_fork(&mut self, branch: &Candidate) -> Result<Vec<(Height, Header)>, Error> {
         let stale = self.rollback(branch.fork_height)?;
 
         for (i, header) in branch.headers.iter().enumerate() {
@@ -543,13 +540,13 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
     }
 
     /// Extend the active chain with a block.
-    fn extend_chain(&mut self, height: Height, hash: BlockHash, header: BlockHeader) {
+    fn extend_chain(&mut self, height: Height, hash: BlockHash, header: Header) {
         assert_eq!(header.prev_blockhash, self.chain.last().hash());
 
         self.headers.insert(hash, height);
         self.orphans.remove(&hash);
         self.chain.push(CachedBlock { height, header });
-        self.chainwork = self.chainwork + header.work();
+        self.chainwork = self.chainwork + Uint256::from_be_bytes(header.work().to_be_bytes());
     }
 
     /// Get the blocks starting from the given height.
@@ -558,9 +555,9 @@ impl<S: Store<Header = BlockHeader>> BlockCache<S> {
     }
 }
 
-impl<S: Store<Header = BlockHeader>> BlockTree for BlockCache<S> {
+impl<S: Store<Header = Header>> BlockTree for BlockCache<S> {
     /// Import blocks into the block tree. Blocks imported this way don't have to form a chain.
-    fn import_blocks<I: Iterator<Item = BlockHeader>, C: Clock>(
+    fn import_blocks<I: Iterator<Item = Header>, C: Clock>(
         &mut self,
         chain: I,
         context: &C,
@@ -622,11 +619,7 @@ impl<S: Store<Header = BlockHeader>> BlockTree for BlockCache<S> {
     }
 
     /// Extend the active chain.
-    fn extend_tip<C: Clock>(
-        &mut self,
-        header: BlockHeader,
-        clock: &C,
-    ) -> Result<ImportResult, Error> {
+    fn extend_tip<C: Clock>(&mut self, header: Header, clock: &C) -> Result<ImportResult, Error> {
         let tip = self.chain.last();
         let hash = header.block_hash();
 
@@ -650,9 +643,9 @@ impl<S: Store<Header = BlockHeader>> BlockTree for BlockCache<S> {
     }
 }
 
-impl<S: Store<Header = BlockHeader>> BlockReader for BlockCache<S> {
+impl<S: Store<Header = Header>> BlockReader for BlockCache<S> {
     /// Get a block by hash. Only searches the active chain.
-    fn get_block(&self, hash: &BlockHash) -> Option<(Height, &BlockHeader)> {
+    fn get_block(&self, hash: &BlockHash) -> Option<(Height, &Header)> {
         self.headers
             .get(hash)
             .and_then(|height| self.chain.get(*height as usize))
@@ -660,12 +653,12 @@ impl<S: Store<Header = BlockHeader>> BlockReader for BlockCache<S> {
     }
 
     /// Get a block by height.
-    fn get_block_by_height(&self, height: Height) -> Option<&BlockHeader> {
+    fn get_block_by_height(&self, height: Height) -> Option<&Header> {
         self.chain.get(height as usize).map(|b| &b.header)
     }
 
     /// Find a branch.
-    fn find_branch(&self, to: &BlockHash) -> Option<(Height, NonEmpty<BlockHeader>)> {
+    fn find_branch(&self, to: &BlockHash) -> Option<(Height, NonEmpty<Header>)> {
         // Check active chain first. If there's a match, the path to return is just the block
         // itself.
         if let Some((height, header)) = self.get_block(to) {
@@ -687,7 +680,7 @@ impl<S: Store<Header = BlockHeader>> BlockReader for BlockCache<S> {
     }
 
     /// Get the best block hash and header.
-    fn tip(&self) -> (BlockHash, BlockHeader) {
+    fn tip(&self) -> (BlockHash, Header) {
         (self.chain.last().hash(), self.chain.last().header)
     }
 
@@ -697,12 +690,12 @@ impl<S: Store<Header = BlockHeader>> BlockReader for BlockCache<S> {
     }
 
     /// Get the genesis block header.
-    fn genesis(&self) -> &BlockHeader {
+    fn genesis(&self) -> &Header {
         &self.chain.first().header
     }
 
     /// Iterate over the longest chain, starting from genesis.
-    fn iter<'a>(&'a self) -> Box<dyn DoubleEndedIterator<Item = (Height, BlockHeader)> + 'a> {
+    fn iter<'a>(&'a self) -> Box<dyn DoubleEndedIterator<Item = (Height, Header)> + 'a> {
         Box::new(Iter::new(&self.chain).map(|(i, h)| (i, h.header)))
     }
 
@@ -767,7 +760,7 @@ impl<S: Store<Header = BlockHeader>> BlockReader for BlockCache<S> {
         locators: &[BlockHash],
         stop_hash: BlockHash,
         max_headers: usize,
-    ) -> Vec<BlockHeader> {
+    ) -> Vec<Header> {
         if locators.is_empty() {
             if let Some((_, header)) = self.get_block(&stop_hash) {
                 return vec![*header];

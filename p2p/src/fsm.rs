@@ -37,17 +37,17 @@ use std::net;
 use std::ops::{Bound, RangeInclusive};
 use std::sync::Arc;
 
-use nakamoto_common::bitcoin::blockdata::block::BlockHeader;
+use nakamoto_common::bitcoin::blockdata::block::Header;
 use nakamoto_common::bitcoin::consensus::encode;
 use nakamoto_common::bitcoin::consensus::params::Params;
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::{NetworkMessage, RawNetworkMessage};
-use nakamoto_common::bitcoin::network::message_blockdata::Inventory;
-use nakamoto_common::bitcoin::network::message_filter::GetCFilters;
-use nakamoto_common::bitcoin::network::message_network::VersionMessage;
-use nakamoto_common::bitcoin::network::Address;
-use nakamoto_common::bitcoin::util::uint::Uint256;
+use nakamoto_common::bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+use nakamoto_common::bitcoin::p2p::message_blockdata::Inventory;
+use nakamoto_common::bitcoin::p2p::message_filter::GetCFilters;
+use nakamoto_common::bitcoin::p2p::message_network::VersionMessage;
+use nakamoto_common::bitcoin::p2p::Address;
+use nakamoto_common::bitcoin::p2p::{Magic, ServiceFlags};
 use nakamoto_common::bitcoin::{Script, Txid};
+use nakamoto_common::bitcoin_num::uint::Uint256;
 use nakamoto_common::block::filter::Filters;
 use nakamoto_common::block::time::AdjustedClock;
 use nakamoto_common::block::time::{LocalDuration, LocalTime};
@@ -201,16 +201,15 @@ impl From<(&peermgr::PeerInfo, &peermgr::Connection)> for Peer {
 }
 
 /// A command or request that can be sent to the protocol.
-#[derive(Clone)]
 pub enum Command {
     /// Get block header at height.
-    GetBlockByHeight(Height, chan::Sender<Option<BlockHeader>>),
+    GetBlockByHeight(Height, chan::Sender<Option<Header>>),
     /// Get block header with a given hash.
-    GetBlockByHash(BlockHash, chan::Sender<Option<(Height, BlockHeader)>>),
+    GetBlockByHash(BlockHash, chan::Sender<Option<(Height, Header)>>),
     /// Get connected peers.
     GetPeers(ServiceFlags, chan::Sender<Vec<Peer>>),
     /// Get the tip of the active chain.
-    GetTip(chan::Sender<(Height, BlockHeader, Uint256)>),
+    GetTip(chan::Sender<(Height, Header, Uint256)>),
     /// Get a block from the active chain.
     RequestBlock(BlockHash),
     /// Get block filters.
@@ -225,12 +224,12 @@ pub enum Command {
         /// Stop scanning at this height. If unbounded, don't stop scanning.
         to: Bound<Height>,
         /// Scripts to match on.
-        watch: Vec<Script>,
+        watch: Vec<Box<Script>>,
     },
     /// Update the watchlist with the provided scripts.
     Watch {
         /// Scripts to watch.
-        watch: Vec<Script>,
+        watch: Vec<Box<Script>>,
     },
     /// Broadcast to peers matching the predicate.
     Broadcast(NetworkMessage, fn(Peer) -> bool, chan::Sender<Vec<PeerId>>),
@@ -241,10 +240,7 @@ pub enum Command {
     /// Disconnect from a peer.
     Disconnect(net::SocketAddr),
     /// Import headers directly into the block store.
-    ImportHeaders(
-        Vec<BlockHeader>,
-        chan::Sender<Result<ImportResult, tree::Error>>,
-    ),
+    ImportHeaders(Vec<Header>, chan::Sender<Result<ImportResult, tree::Error>>),
     /// Import addresses into the address book.
     ImportAddresses(Vec<Address>),
     /// Submit a transaction to the network.
@@ -598,10 +594,10 @@ impl<T: BlockTree, F: Filters, P: peer::Store, C: AdjustedClock<PeerId>> Iterato
             .map(|io| match io {
                 output::Io::Write(addr, payload) => Io::Write(
                     addr,
-                    RawNetworkMessage {
-                        magic: self.network.magic(),
+                    RawNetworkMessage::new(
+                        Magic::from_bytes(self.network.magic().to_be_bytes()),
                         payload,
-                    },
+                    ),
                 ),
                 output::Io::Connect(addr) => Io::Connect(addr),
                 output::Io::Disconnect(addr, reason) => Io::Disconnect(addr, reason),
@@ -768,10 +764,11 @@ impl<T: BlockTree, F: Filters, P: peer::Store, C: AdjustedClock<PeerId>> traits:
         let addr = *addr;
         let msg = msg.into_owned();
 
-        if msg.magic != self.network.magic() {
-            return self
-                .peermgr
-                .disconnect(addr, DisconnectReason::PeerMagic(msg.magic));
+        if *msg.magic() != Magic::from_bytes(self.network.magic().to_be_bytes()) {
+            return self.peermgr.disconnect(
+                addr,
+                DisconnectReason::PeerMagic(u32::from_be_bytes(msg.magic().to_bytes())),
+            );
         }
 
         if !self.peermgr.is_connected(&addr) {
@@ -781,7 +778,7 @@ impl<T: BlockTree, F: Filters, P: peer::Store, C: AdjustedClock<PeerId>> traits:
 
         debug!(target: "p2p", "Received {:?} from {}", cmd, addr);
 
-        if let Err(err) = (self.hooks.on_message)(addr, &msg.payload, &self.outbox) {
+        if let Err(err) = (self.hooks.on_message)(addr, &msg.payload(), &self.outbox) {
             debug!(
                 target: "p2p",
                 "Message {:?} from {} dropped by user hook: {}",
@@ -794,7 +791,7 @@ impl<T: BlockTree, F: Filters, P: peer::Store, C: AdjustedClock<PeerId>> traits:
         // push it to our outbox.
         self.event(Event::MessageReceived {
             from: addr,
-            message: Arc::new(msg.payload),
+            message: Arc::new(msg.payload().clone()),
         });
     }
 

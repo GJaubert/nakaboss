@@ -212,4 +212,8 @@ pub trait Reactor<Id: PeerId = net::SocketAddr> {
     /// The reactor can provide multiple wakers such that multiple user threads may wake
     /// the event loop.
     fn waker(&self) -> Self::Waker;
+
+    // Configure Bitcoin network settings for BIP324 compatibility.
+    /// Default implementation does nothing for backward compatibility.
+    fn configure_network(&mut self, network: String, is_v2: bool);
 }

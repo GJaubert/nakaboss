@@ -16,10 +16,10 @@
 //!
 use std::net;
 
-use nakamoto_common::bitcoin::network::address::Address;
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
-use nakamoto_common::bitcoin::network::message_network::VersionMessage;
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::message_network::VersionMessage;
+use nakamoto_common::bitcoin::p2p::Address;
+use nakamoto_common::bitcoin::p2p::ServiceFlags;
 use nakamoto_common::block::tree::BlockReader;
 
 use nakamoto_common::p2p::peer::AddressSource;
@@ -881,7 +881,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    use nakamoto_common::bitcoin::network::address::Address;
+    use nakamoto_common::bitcoin::p2p::Address;
     use nakamoto_common::block::time::{AdjustedTime, RefClock};
     use nakamoto_common::p2p::peer::Source;
     use nakamoto_test::assert_matches;

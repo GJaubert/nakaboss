@@ -1,13 +1,11 @@
 #![allow(dead_code)]
 //! Compact block filter cache.
 
-use std::io;
 use std::ops::ControlFlow;
 use std::ops::RangeInclusive;
 
 use nakamoto_common::bitcoin::consensus::{encode, Decodable, Encodable};
-
-use nakamoto_common::bitcoin_hashes::Hash;
+use nakamoto_common::bitcoin::hashes::Hash;
 pub use nakamoto_common::block::filter::{
     self, BlockFilter, Error, FilterHash, FilterHeader, Filters,
 };
@@ -36,7 +34,10 @@ impl Default for StoredHeader {
 }
 
 impl Encodable for StoredHeader {
-    fn consensus_encode<W: io::Write + ?Sized>(&self, e: &mut W) -> Result<usize, io::Error> {
+    fn consensus_encode<W: nakamoto_common::bitcoin::io::Write + ?Sized>(
+        &self,
+        e: &mut W,
+    ) -> Result<usize, nakamoto_common::bitcoin::io::Error> {
         let mut len = 0;
 
         len += self.hash.consensus_encode(e)?;
@@ -47,7 +48,9 @@ impl Encodable for StoredHeader {
 }
 
 impl Decodable for StoredHeader {
-    fn consensus_decode<D: io::Read + ?Sized>(d: &mut D) -> Result<Self, encode::Error> {
+    fn consensus_decode<D: nakamoto_common::bitcoin::io::Read + ?Sized>(
+        d: &mut D,
+    ) -> Result<Self, encode::Error> {
         let hash = FilterHash::consensus_decode(d)?;
         let header = FilterHeader::consensus_decode(d)?;
 
@@ -132,12 +135,6 @@ impl<S> FilterCache<S> {
 
 #[allow(unused_variables)]
 impl<S: Store<Header = StoredHeader>> Filters for FilterCache<S> {
-    fn get_header(&self, height: Height) -> Option<(FilterHash, FilterHeader)> {
-        self.headers
-            .get(height as usize)
-            .map(|s| (s.hash, s.header))
-    }
-
     fn get_headers(&self, range: RangeInclusive<Height>) -> Vec<(FilterHash, FilterHeader)> {
         let (start, end) = (*range.start(), *range.end());
 
@@ -147,6 +144,12 @@ impl<S: Store<Header = StoredHeader>> Filters for FilterCache<S> {
             .take(end as usize - start as usize + 1)
             .map(|h| (h.hash, h.header))
             .collect()
+    }
+
+    fn get_header(&self, height: Height) -> Option<(FilterHash, FilterHeader)> {
+        self.headers
+            .get(height as usize)
+            .map(|s| (s.hash, s.header))
     }
 
     fn import_headers(

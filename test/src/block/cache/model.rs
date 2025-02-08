@@ -3,7 +3,6 @@
 
 use std::ops::RangeInclusive;
 
-use nakamoto_common::bitcoin_hashes::Hash;
 use nakamoto_common::block::filter::{self, BlockFilter, FilterHash, FilterHeader, Filters};
 use nakamoto_common::block::iter::Iter;
 use nakamoto_common::block::tree::{BlockReader, BlockTree, Branch, Error, ImportResult};
@@ -12,20 +11,21 @@ use nakamoto_common::nonempty::NonEmpty;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use nakamoto_common::bitcoin::blockdata::block::BlockHeader;
+use nakamoto_common::bitcoin::blockdata::block::Header;
 use nakamoto_common::bitcoin::hash_types::BlockHash;
-use nakamoto_common::bitcoin::util::uint::Uint256;
+use nakamoto_common::bitcoin_hashes::Hash;
+use nakamoto_common::bitcoin_num::uint::Uint256;
 
 #[derive(Debug, Clone)]
 pub struct Cache {
-    pub headers: HashMap<BlockHash, BlockHeader>,
-    pub chain: NonEmpty<BlockHeader>,
+    pub headers: HashMap<BlockHash, Header>,
+    pub chain: NonEmpty<Header>,
     pub tip: BlockHash,
     pub genesis: BlockHash,
 }
 
 impl Cache {
-    pub fn new(genesis: BlockHeader) -> Self {
+    pub fn new(genesis: Header) -> Self {
         let mut headers = HashMap::new();
         let hash = genesis.block_hash();
         let chain = NonEmpty::new(genesis);
@@ -40,7 +40,7 @@ impl Cache {
         }
     }
 
-    pub fn from(chain: NonEmpty<BlockHeader>) -> Self {
+    pub fn from(chain: NonEmpty<Header>) -> Self {
         let genesis = chain.head.block_hash();
         let tip = chain.last().block_hash();
 
@@ -64,7 +64,7 @@ impl Cache {
         Ok(())
     }
 
-    fn branch(&self, tip: &BlockHash) -> Option<NonEmpty<BlockHeader>> {
+    fn branch(&self, tip: &BlockHash) -> Option<NonEmpty<Header>> {
         let mut headers = VecDeque::new();
         let mut tip = *tip;
 
@@ -81,7 +81,7 @@ impl Cache {
         }
     }
 
-    fn longest_chain(&self) -> NonEmpty<BlockHeader> {
+    fn longest_chain(&self) -> NonEmpty<Header> {
         let mut branches = Vec::new();
 
         for tip in self.headers.keys() {
@@ -110,7 +110,7 @@ impl Cache {
 }
 
 impl BlockTree for Cache {
-    fn import_blocks<I: Iterator<Item = BlockHeader>, C>(
+    fn import_blocks<I: Iterator<Item = Header>, C>(
         &mut self,
         chain: I,
         _context: &C,
@@ -152,7 +152,7 @@ impl BlockTree for Cache {
         }
     }
 
-    fn extend_tip<C>(&mut self, header: BlockHeader, _context: &C) -> Result<ImportResult, Error> {
+    fn extend_tip<C>(&mut self, header: Header, _context: &C) -> Result<ImportResult, Error> {
         if header.prev_blockhash == self.tip {
             let hash = header.block_hash();
 
@@ -174,7 +174,7 @@ impl BlockTree for Cache {
 }
 
 impl BlockReader for Cache {
-    fn get_block(&self, hash: &BlockHash) -> Option<(Height, &BlockHeader)> {
+    fn get_block(&self, hash: &BlockHash) -> Option<(Height, &Header)> {
         for (height, header) in self.chain.iter().enumerate() {
             if hash == &header.block_hash() {
                 return Some((height as Height, header));
@@ -187,12 +187,12 @@ impl BlockReader for Cache {
         let mut work = Uint256::default();
 
         for block in self.chain.iter() {
-            work = work + block.work();
+            work = work + Uint256::from_be_bytes(block.work().to_be_bytes());
         }
         work
     }
 
-    fn find_branch(&self, _to: &BlockHash) -> Option<(Height, NonEmpty<BlockHeader>)> {
+    fn find_branch(&self, _to: &BlockHash) -> Option<(Height, NonEmpty<Header>)> {
         unimplemented!()
     }
 
@@ -201,7 +201,7 @@ impl BlockReader for Cache {
         _locators: &[BlockHash],
         _stop_hash: BlockHash,
         _max: usize,
-    ) -> Vec<BlockHeader> {
+    ) -> Vec<Header> {
         unimplemented!()
     }
 
@@ -217,11 +217,11 @@ impl BlockReader for Cache {
         vec![self.chain.last().block_hash()]
     }
 
-    fn get_block_by_height(&self, height: Height) -> Option<&BlockHeader> {
+    fn get_block_by_height(&self, height: Height) -> Option<&Header> {
         self.chain.get(height as usize)
     }
 
-    fn tip(&self) -> (BlockHash, BlockHeader) {
+    fn tip(&self) -> (BlockHash, Header) {
         let tip = self.chain.last();
         (tip.block_hash(), *tip)
     }
@@ -230,7 +230,7 @@ impl BlockReader for Cache {
         self.chain.len() as Height - 1
     }
 
-    fn iter<'a>(&'a self) -> Box<dyn DoubleEndedIterator<Item = (Height, BlockHeader)> + 'a> {
+    fn iter<'a>(&'a self) -> Box<dyn DoubleEndedIterator<Item = (Height, Header)> + 'a> {
         Box::new(Iter::new(&self.chain).map(|(i, h)| (i, *h)))
     }
 

@@ -137,7 +137,7 @@ impl FeeEstimator {
 
     /// Apply the transaction to the UTXO set and calculate the fee rate.
     fn apply(&mut self, tx: &Transaction) -> Option<FeeRate> {
-        let txid = tx.txid();
+        let txid = tx.compute_txid();
         let mut received = 0;
         let mut sent = 0;
 
@@ -148,10 +148,10 @@ impl FeeEstimator {
                 vout: vout as u32,
             };
             self.utxos.insert(outpoint, output.clone());
-            sent += output.value;
+            sent += output.value.to_sat();
         }
         // Since coinbase transactions have no inputs, we only process the outputs.
-        if tx.is_coin_base() {
+        if tx.is_coinbase() {
             return None;
         }
 
@@ -161,7 +161,7 @@ impl FeeEstimator {
         // the transaction fee. If one is missing, we have to bail.
         for input in tx.input.iter() {
             if let Some(out) = self.utxos.remove(&input.previous_output) {
-                received += out.value;
+                received += out.value.to_sat();
             } else {
                 return None;
             }
@@ -170,7 +170,7 @@ impl FeeEstimator {
 
         let fee = received - sent;
         let weight = tx.weight();
-        let rate = fee as f64 / (weight as f64 / WITNESS_SCALE_FACTOR as f64);
+        let rate = fee as f64 / (weight.to_wu() as f64 / WITNESS_SCALE_FACTOR as f64);
 
         Some(rate.round() as FeeRate)
     }

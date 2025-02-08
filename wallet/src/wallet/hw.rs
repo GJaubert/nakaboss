@@ -1,6 +1,7 @@
 use std::{ops::Range, str::FromStr};
 
-use bitcoin::{util::bip32::DerivationPath, Address};
+use bitcoin::{bip32::DerivationPath, Address};
+use coldcard::{Api, Coldcard};
 use nakamoto_common::bitcoin;
 
 pub use coldcard::protocol::AddressFormat;
@@ -14,7 +15,7 @@ pub enum Error {
     #[error("failed to open hardware device")]
     Open,
     #[error("failed to decode address from device")]
-    Address(#[from] bitcoin::util::address::Error),
+    Address(#[from] bitcoin::address::error::ParseError),
     #[error("derivation path error")]
     DerivationPath(coldcard::protocol::derivation_path::Error),
     #[error("device error: {0}")]
@@ -45,8 +46,9 @@ impl Hw {
 
     pub fn reconnect(&mut self) -> Result<&mut coldcard::Coldcard, Error> {
         // Detect all connected Coldcards.
-        let serials = coldcard::detect()?;
-        let (coldcard, _) = serials.first().ok_or(Error::NoDevice)?.open(None)?;
+        let mut api = Api::new()?;
+        let serials = api.detect()?;
+        let (coldcard, _) = Coldcard::open(api, serials.first().unwrap(), None)?;
         let coldcard = self.device.get_or_insert(coldcard);
 
         Ok(coldcard)
@@ -73,7 +75,8 @@ impl Hw {
                 .map_err(Error::DerivationPath)?;
             // TODO: This should be made to return `Address` type.
             let addr = device.address(child, format)?;
-            let addr = Address::from_str(addr.as_str())?;
+            // TODO: Look for ways of making this safe, but it should return `Address` type
+            let addr = Address::from_str(addr.as_str())?.assume_checked();
 
             log::debug!("Loaded address {addr} from device");
 

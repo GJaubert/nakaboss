@@ -4,15 +4,15 @@ use std::ops::{Deref, DerefMut};
 use super::*;
 
 use nakamoto_common::bitcoin::consensus::Params;
-use nakamoto_common::bitcoin::network::message_network::VersionMessage;
-use nakamoto_common::bitcoin::network::Address;
+use nakamoto_common::bitcoin::p2p::message_network::VersionMessage;
+use nakamoto_common::bitcoin::p2p::Address;
 
 use nakamoto_chain::block::cache::BlockCache;
 use nakamoto_chain::block::store;
 use nakamoto_common::block::filter::{FilterHash, FilterHeader};
 use nakamoto_common::block::store::Genesis;
 use nakamoto_common::block::time::{Clock, RefClock};
-use nakamoto_common::block::BlockHeader;
+use nakamoto_common::block::Header;
 use nakamoto_common::collections::{HashMap, HashSet};
 use nakamoto_common::nonempty::NonEmpty;
 use nakamoto_common::p2p::peer::KnownAddress;
@@ -113,7 +113,7 @@ impl Peer<Protocol> {
         name: &'static str,
         ip: impl Into<net::IpAddr>,
         network: Network,
-        headers: Vec<BlockHeader>,
+        headers: Vec<Header>,
         cfheaders: Vec<(FilterHash, FilterHeader)>,
         peers: Vec<(net::SocketAddr, Source, ServiceFlags)>,
         rng: fastrand::Rng,
@@ -142,7 +142,7 @@ impl Peer<Protocol> {
     pub fn config(
         name: &'static str,
         ip: impl Into<net::IpAddr>,
-        headers: Vec<BlockHeader>,
+        headers: Vec<Header>,
         cfheaders: Vec<(FilterHash, FilterHeader)>,
         peers: Vec<(net::SocketAddr, Source, ServiceFlags)>,
         cfg: Config,
@@ -241,10 +241,10 @@ impl Peer<Protocol> {
     pub fn received(&mut self, remote: &net::SocketAddr, payload: NetworkMessage) {
         self.protocol.message_received(
             remote,
-            Cow::Owned(RawNetworkMessage {
-                magic: self.protocol.network.magic(),
+            Cow::Owned(RawNetworkMessage::new(
+                Magic::from_bytes(self.protocol.network.magic().to_be_bytes()),
                 payload,
-            }),
+            )),
         );
     }
 

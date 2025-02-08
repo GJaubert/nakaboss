@@ -6,16 +6,16 @@ use std::ops::RangeInclusive;
 use nakamoto_chain::block::Block;
 use nakamoto_chain::filter::BlockFilter;
 
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::{NetworkMessage, RawNetworkMessage};
-use nakamoto_common::bitcoin::network::Address;
-use nakamoto_common::bitcoin::util::uint::Uint256;
+use nakamoto_common::bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+use nakamoto_common::bitcoin::p2p::Address;
+use nakamoto_common::bitcoin::p2p::{Magic, ServiceFlags};
 use nakamoto_common::bitcoin::Txid;
+use nakamoto_common::bitcoin_num::uint::Uint256;
 use nakamoto_common::block::filter::FilterHeader;
 use nakamoto_common::block::store::Genesis as _;
 use nakamoto_common::block::time::{AdjustedTime, LocalTime};
 use nakamoto_common::block::tree::{self, ImportResult};
-use nakamoto_common::block::{BlockHash, BlockHeader, Height, Transaction};
+use nakamoto_common::block::{BlockHash, Header, Height, Transaction};
 use nakamoto_common::network::Network;
 use nakamoto_common::nonempty::NonEmpty;
 use nakamoto_common::p2p::peer::KnownAddress;
@@ -64,7 +64,11 @@ impl Client {
 
     pub fn handle(&self) -> TestHandle {
         TestHandle {
-            tip: (0, self.network.genesis(), self.network.genesis().work()),
+            tip: (
+                0,
+                self.network.genesis(),
+                Uint256::from_be_bytes(self.network.genesis().work().to_be_bytes()),
+            ),
             network: self.network,
             blocks: self.blocks_.clone(),
             filters: self.filters_.clone(),
@@ -74,10 +78,10 @@ impl Client {
     }
 
     pub fn received(&mut self, remote: &net::SocketAddr, payload: NetworkMessage) {
-        let msg = RawNetworkMessage {
-            magic: self.network.magic(),
+        let msg = RawNetworkMessage::new(
+            Magic::from_bytes(self.network.magic().to_be_bytes()),
             payload,
-        };
+        );
 
         self.protocol.message_received(remote, Cow::Owned(msg));
     }
@@ -135,7 +139,7 @@ impl Default for Client {
 
 #[derive(Clone)]
 pub struct TestHandle {
-    pub tip: (Height, BlockHeader, Uint256),
+    pub tip: (Height, Header, Uint256),
 
     #[allow(dead_code)]
     network: Network,
@@ -146,15 +150,15 @@ pub struct TestHandle {
 }
 
 impl Handle for TestHandle {
-    fn get_tip(&self) -> Result<(Height, BlockHeader, Uint256), handle::Error> {
+    fn get_tip(&self) -> Result<(Height, Header, Uint256), handle::Error> {
         Ok(self.tip)
     }
 
-    fn get_block(&self, _hash: &BlockHash) -> Result<Option<(Height, BlockHeader)>, handle::Error> {
+    fn get_block(&self, _hash: &BlockHash) -> Result<Option<(Height, Header)>, handle::Error> {
         unimplemented!()
     }
 
-    fn get_block_by_height(&self, _height: Height) -> Result<Option<BlockHeader>, handle::Error> {
+    fn get_block_by_height(&self, _height: Height) -> Result<Option<Header>, handle::Error> {
         unimplemented!()
     }
 
@@ -181,7 +185,7 @@ impl Handle for TestHandle {
     fn find_branch(
         &self,
         _to: &BlockHash,
-    ) -> Result<Option<(Height, NonEmpty<BlockHeader>)>, handle::Error> {
+    ) -> Result<Option<(Height, NonEmpty<Header>)>, handle::Error> {
         unimplemented!()
     }
 
@@ -227,7 +231,7 @@ impl Handle for TestHandle {
 
     fn import_headers(
         &self,
-        _headers: Vec<BlockHeader>,
+        _headers: Vec<Header>,
     ) -> Result<Result<ImportResult, tree::Error>, handle::Error> {
         unimplemented!()
     }

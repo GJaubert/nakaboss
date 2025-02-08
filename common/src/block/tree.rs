@@ -1,11 +1,11 @@
 //! Types and functions relating to block trees.
 #![warn(missing_docs)]
-use std::collections::BTreeMap;
-
-use bitcoin::blockdata::block::BlockHeader;
+use bitcoin::blockdata::block::Header as BitcoinBlockHeader;
 use bitcoin::consensus::params::Params;
 use bitcoin::hash_types::BlockHash;
-use bitcoin::util::uint::Uint256;
+use bitcoin::pow;
+use bitcoin_num::uint::Uint256;
+use std::collections::BTreeMap;
 
 use thiserror::Error;
 
@@ -23,7 +23,7 @@ pub enum Error {
 
     /// The block's difficulty target is invalid.
     #[error("invalid block difficulty target: {0}, expected {1}")]
-    InvalidBlockTarget(Target, Target),
+    InvalidBlockTarget(pow::Target, pow::Target),
 
     /// The block's hash doesn't match the checkpoint.
     #[error("invalid checkpoint block hash {0} at height {1}")]
@@ -68,9 +68,9 @@ pub trait Header {
     fn work(&self) -> Work;
 }
 
-impl Header for BlockHeader {
+impl Header for BitcoinBlockHeader {
     fn work(&self) -> Work {
-        self.work()
+        Uint256::from_be_bytes(self.work().to_be_bytes())
     }
 }
 
@@ -85,15 +85,15 @@ pub enum ImportResult {
     ///
     TipChanged {
         /// Tip header.
-        header: BlockHeader,
+        header: BitcoinBlockHeader,
         /// Tip hash.
         hash: BlockHash,
         /// Tip height.
         height: Height,
         /// Blocks reverted/disconnected.
-        reverted: Vec<(Height, BlockHeader)>,
+        reverted: Vec<(Height, BitcoinBlockHeader)>,
         /// Blocks added/connected.
-        connected: NonEmpty<(Height, BlockHeader)>,
+        connected: NonEmpty<(Height, BitcoinBlockHeader)>,
     },
     /// The block headers were imported successfully, but our best block hasn't changed.
     /// This will happen if we imported a duplicate, orphan or stale block.
@@ -118,7 +118,7 @@ impl<'a, H: Header> Branch<'a, H> {
 /// A representation of all known blocks that keeps track of the longest chain.
 pub trait BlockTree: BlockReader {
     /// Import a chain of block headers into the block tree.
-    fn import_blocks<I: Iterator<Item = BlockHeader>, C: Clock>(
+    fn import_blocks<I: Iterator<Item = BitcoinBlockHeader>, C: Clock>(
         &mut self,
         chain: I,
         context: &C,
@@ -127,7 +127,7 @@ pub trait BlockTree: BlockReader {
     /// the block didn't connect, and `Err` if the block was invalid.
     fn extend_tip<C: Clock>(
         &mut self,
-        header: BlockHeader,
+        header: BitcoinBlockHeader,
         context: &C,
     ) -> Result<ImportResult, Error>;
 }
@@ -135,24 +135,25 @@ pub trait BlockTree: BlockReader {
 /// Read block header state.
 pub trait BlockReader {
     /// Get a block by hash.
-    fn get_block(&self, hash: &BlockHash) -> Option<(Height, &BlockHeader)>;
+    fn get_block(&self, hash: &BlockHash) -> Option<(Height, &BitcoinBlockHeader)>;
     /// Get a block by height.
-    fn get_block_by_height(&self, height: Height) -> Option<&BlockHeader>;
+    fn get_block_by_height(&self, height: Height) -> Option<&BitcoinBlockHeader>;
     /// Find a path from the active chain to the provided (stale) block hash.
     ///
     /// If a path is found, the height of the start/fork block is returned, along with the
     /// headers up to and including the tip, forming a branch.
     ///
     /// If the given block is on the active chain, its height and header is returned.
-    fn find_branch(&self, to: &BlockHash) -> Option<(Height, NonEmpty<BlockHeader>)>;
+    fn find_branch(&self, to: &BlockHash) -> Option<(Height, NonEmpty<BitcoinBlockHeader>)>;
     /// Iterate over the longest chain, starting from genesis.
-    fn chain<'a>(&'a self) -> Box<dyn Iterator<Item = BlockHeader> + 'a> {
+    fn chain<'a>(&'a self) -> Box<dyn Iterator<Item = BitcoinBlockHeader> + 'a> {
         Box::new(self.iter().map(|(_, h)| h))
     }
     /// Get the "chainwork", ie. the total accumulated proof-of-work of the active chain.
     fn chain_work(&self) -> Uint256;
     /// Iterate over the longest chain, starting from genesis, including heights.
-    fn iter<'a>(&'a self) -> Box<dyn DoubleEndedIterator<Item = (Height, BlockHeader)> + 'a>;
+    fn iter<'a>(&'a self)
+        -> Box<dyn DoubleEndedIterator<Item = (Height, BitcoinBlockHeader)> + 'a>;
     /// Iterate over a range of blocks.
     fn range<'a>(
         &'a self,
@@ -168,9 +169,9 @@ pub trait BlockReader {
     /// Return the height of the longest chain.
     fn height(&self) -> Height;
     /// Get the tip of the longest chain.
-    fn tip(&self) -> (BlockHash, BlockHeader);
+    fn tip(&self) -> (BlockHash, BitcoinBlockHeader);
     /// Get the last block of the longest chain.
-    fn best_block(&self) -> (Height, &BlockHeader) {
+    fn best_block(&self) -> (Height, &BitcoinBlockHeader) {
         let height = self.height();
         (
             height,
@@ -183,7 +184,7 @@ pub trait BlockReader {
     /// Known checkpoints.
     fn checkpoints(&self) -> BTreeMap<Height, BlockHash>;
     /// Return the genesis block header.
-    fn genesis(&self) -> &BlockHeader {
+    fn genesis(&self) -> &BitcoinBlockHeader {
         self.get_block_by_height(0)
             .expect("the genesis block is always present")
     }
@@ -197,7 +198,7 @@ pub trait BlockReader {
         locators: &[BlockHash],
         stop_hash: BlockHash,
         max_headers: usize,
-    ) -> Vec<BlockHeader>;
+    ) -> Vec<BitcoinBlockHeader>;
     /// Get the locator hashes starting from the given height and going backwards.
     fn locator_hashes(&self, from: Height) -> Vec<BlockHash>;
     /// Get the next difficulty given a block height, time and bits.
@@ -205,13 +206,13 @@ pub trait BlockReader {
         &self,
         last_height: Height,
         last_time: BlockTime,
-        last_target: Target,
+        last_target: &bitcoin::Target,
         params: &Params,
     ) -> Bits {
         // Only adjust on set intervals. Otherwise return current target.
         // Since the height is 0-indexed, we add `1` to check it against the interval.
         if (last_height + 1) % params.difficulty_adjustment_interval() != 0 {
-            return BlockHeader::compact_target_from_u256(&last_target);
+            return last_target.to_compact_lossy().to_consensus();
         }
 
         let last_adjustment_height =
@@ -222,7 +223,7 @@ pub trait BlockReader {
         let last_adjustment_time = last_adjustment_block.time;
 
         if params.no_pow_retargeting {
-            return last_adjustment_block.bits;
+            return last_adjustment_block.bits.to_consensus();
         }
 
         let actual_timespan = last_time - last_adjustment_time;
@@ -234,16 +235,30 @@ pub trait BlockReader {
             adjusted_timespan = params.pow_target_timespan as BlockTime * 4;
         }
 
-        let mut target = last_target;
+        let target = last_target;
 
-        target = target.mul_u32(adjusted_timespan);
-        target = target / Target::from_u64(params.pow_target_timespan).unwrap();
+        let uint_target: Uint256 = Uint256::from_be_bytes(target.to_be_bytes());
+        let mut target_bytes = uint_target.mul_u32(adjusted_timespan);
+        target_bytes = target_bytes / Target::from_u64(params.pow_target_timespan).unwrap();
+
+        let mut target = convert_to_bitcoin_target(target_bytes);
 
         // Ensure a difficulty floor.
-        if target > params.pow_limit {
-            target = params.pow_limit;
+        if target > params.max_attainable_target {
+            target = params.max_attainable_target;
         }
 
-        BlockHeader::compact_target_from_u256(&target)
+        target.to_compact_lossy().to_consensus()
     }
+}
+
+/// Util to convert from Uint256 to bitcoin::Target
+pub fn convert_to_bitcoin_target(target_uint: Uint256) -> bitcoin::Target {
+    let uint_bytes = target_uint.to_bytes();
+    let mut target_bytes = [0u8; 32];
+    for (i, &num) in uint_bytes.iter().rev().enumerate() {
+        let start = i * 8;
+        target_bytes[start..start + 8].copy_from_slice(&num.to_be_bytes());
+    }
+    bitcoin::Target::from_be_bytes(target_bytes)
 }

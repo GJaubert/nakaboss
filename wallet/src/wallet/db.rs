@@ -3,10 +3,10 @@ mod types;
 use std::path::Path;
 use std::str::FromStr;
 
-use nakamoto_common::bitcoin::Address;
 use nakamoto_common::bitcoin::OutPoint;
 use nakamoto_common::bitcoin::TxOut;
 use nakamoto_common::bitcoin::Txid;
+use nakamoto_common::bitcoin::{Address, Amount};
 
 use sqlite as sql;
 
@@ -86,8 +86,10 @@ impl Read for Db {
 
         if let Some(Ok(row)) = row {
             let address = row.get::<String, _>("address");
+            // TODO: unsafe assuming, please fix
             let script_pubkey = Address::from_str(&address)
                 .map_err(|_| Error::Decoding("address"))?
+                .assume_checked()
                 .script_pubkey();
             let value = row.get::<i64, _>("value") as u64;
 
@@ -95,7 +97,7 @@ impl Read for Db {
                 *outpoint,
                 TxOut {
                     script_pubkey,
-                    value,
+                    value: Amount::from_sat(value),
                 },
             )));
         }
@@ -113,9 +115,10 @@ impl Read for Db {
             let Record((txid, vout, address, value)): Record<(String, i64, String, Balance)> =
                 row.try_into()?;
             let txid = txid.parse().map_err(|_| Error::Decoding("txid"))?;
-            let address = address
-                .parse::<Address>()
-                .map_err(|_| Error::Decoding("address"))?;
+            // TODO: unsafe assuming, please fix
+            let address = Address::from_str(&address)
+                .map_err(|_| Error::Decoding("address"))?
+                .assume_checked();
 
             utxos.push((
                 OutPoint {
@@ -124,7 +127,7 @@ impl Read for Db {
                 },
                 TxOut {
                     script_pubkey: address.script_pubkey(),
-                    value: *value,
+                    value: Amount::from_sat(*value),
                 },
             ));
         }
@@ -211,7 +214,7 @@ impl Write for Db {
 
 impl Db {
     /// The database schema.
-    const SCHEMA: &str = include_str!("schema.sql");
+    const SCHEMA: &'static str = include_str!("schema.sql");
 
     /// Open a wallet database at the given path. If none exists, an empty database is created.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
@@ -259,17 +262,27 @@ mod tests {
         let address = Address::from_script(&tx.output[0].script_pubkey, Network::Bitcoin).unwrap();
 
         let out = OutPoint {
-            txid: tx.txid(),
+            txid: tx.compute_txid(),
             vout: rng.u32(..),
         };
 
         let added = db
-            .add_utxo(out.txid, out.vout, address.clone(), tx.output[0].value)
+            .add_utxo(
+                out.txid,
+                out.vout,
+                address.clone(),
+                tx.output[0].value.to_sat(),
+            )
             .unwrap();
         assert!(added);
 
         let added = db
-            .add_utxo(out.txid, out.vout, address.clone(), tx.output[0].value)
+            .add_utxo(
+                out.txid,
+                out.vout,
+                address.clone(),
+                tx.output[0].value.to_sat(),
+            )
             .unwrap();
         assert!(!added);
 
@@ -286,12 +299,12 @@ mod tests {
         let address = Address::from_script(&tx.output[0].script_pubkey, Network::Bitcoin).unwrap();
 
         let out = OutPoint {
-            txid: tx.txid(),
+            txid: tx.compute_txid(),
             vout: rng.u32(..),
         };
 
         let added = db
-            .add_utxo(out.txid, out.vout, address, tx.output[0].value)
+            .add_utxo(out.txid, out.vout, address, tx.output[0].value.to_sat())
             .unwrap();
         assert!(added);
 
@@ -308,15 +321,15 @@ mod tests {
         let address = Address::from_script(&tx.output[0].script_pubkey, Network::Bitcoin).unwrap();
 
         let out = OutPoint {
-            txid: tx.txid(),
+            txid: tx.compute_txid(),
             vout: rng.u32(..),
         };
 
-        db.add_utxo(out.txid, 1, address.clone(), tx.output[0].value)
+        db.add_utxo(out.txid, 1, address.clone(), tx.output[0].value.to_sat())
             .unwrap();
-        db.add_utxo(out.txid, 2, address.clone(), tx.output[0].value)
+        db.add_utxo(out.txid, 2, address.clone(), tx.output[0].value.to_sat())
             .unwrap();
-        db.add_utxo(out.txid, 3, address, tx.output[0].value)
+        db.add_utxo(out.txid, 3, address, tx.output[0].value.to_sat())
             .unwrap();
 
         let utxos = db

@@ -2,13 +2,13 @@
 //! Manages header synchronization with peers.
 //!
 use nakamoto_common::bitcoin::consensus::params::Params;
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
-use nakamoto_common::bitcoin::network::message_blockdata::{GetHeadersMessage, Inventory};
-use nakamoto_common::bitcoin_hashes::Hash;
+use nakamoto_common::bitcoin::hashes::Hash;
+use nakamoto_common::bitcoin::p2p::ServiceFlags;
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use nakamoto_common::block::time::{Clock, LocalDuration, LocalTime};
 use nakamoto_common::block::tree::{BlockReader, BlockTree, Error, ImportResult};
-use nakamoto_common::block::{BlockHash, BlockHeader, Height};
+use nakamoto_common::block::{BlockHash, Header, Height};
 use nakamoto_common::collections::{AddressBook, HashMap};
 use nakamoto_common::nonempty::NonEmpty;
 
@@ -167,7 +167,7 @@ impl<C: Clock> SyncManager<C> {
             }
             Event::MessageReceived { from, message } => match message.as_ref() {
                 NetworkMessage::Headers(headers) => {
-                    self.received_headers(&from, headers, tree);
+                    self.received_headers(&from, &headers, tree);
                 }
                 NetworkMessage::SendHeaders => {
                     // We adhere to `sendheaders` by default.
@@ -177,10 +177,10 @@ impl<C: Clock> SyncManager<C> {
                     stop_hash,
                     ..
                 }) => {
-                    self.received_getheaders(&from, (locator_hashes.to_vec(), *stop_hash), tree);
+                    self.received_getheaders(&from, (locator_hashes.to_vec(), stop_hash.clone()), tree);
                 }
                 NetworkMessage::Inv(inventory) => {
-                    self.received_inv(from, inventory, tree);
+                    self.received_inv(from, &inventory, tree);
                     // TODO: invmgr: Update block availability for this peer.
                 }
                 _ => {}
@@ -238,7 +238,7 @@ impl<C: Clock> SyncManager<C> {
     }
 
     /// Import blocks into our block tree.
-    pub fn import_blocks<T: BlockTree, I: Iterator<Item = BlockHeader>>(
+    pub fn import_blocks<T: BlockTree, I: Iterator<Item = Header>>(
         &mut self,
         blocks: I,
         tree: &mut T,
@@ -278,7 +278,7 @@ impl<C: Clock> SyncManager<C> {
     pub fn received_headers<T: BlockTree>(
         &mut self,
         from: &PeerId,
-        headers: &[BlockHeader],
+        headers: &[Header],
         tree: &mut T,
     ) {
         let request = self.inflight.remove(from);

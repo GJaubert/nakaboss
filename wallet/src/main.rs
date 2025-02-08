@@ -1,9 +1,9 @@
 use std::net;
 use std::path::PathBuf;
-
+use std::str::FromStr;
 use argh::FromArgs;
 
-use nakamoto_common::bitcoin::util::bip32::DerivationPath;
+use nakamoto_common::bitcoin::bip32::DerivationPath;
 use nakamoto_common::bitcoin::Address;
 use nakamoto_common::block::Height;
 use nakamoto_common::network::Network;
@@ -14,7 +14,7 @@ use nakamoto_wallet::logger;
 pub struct Options {
     /// watch the following addresses
     #[argh(option)]
-    pub addresses: Vec<Address>,
+    pub addresses: Vec<AddressWrapper>,
     /// wallet birth height, from which to start scanning
     #[argh(option)]
     pub birth_height: Height,
@@ -41,6 +41,16 @@ pub struct Options {
 impl Options {
     pub fn from_env() -> Self {
         argh::from_env()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AddressWrapper(Address);
+
+impl FromStr for AddressWrapper {
+    type Err = nakamoto_common::bitcoin::address::error::ParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Address::from_str(s)?.assume_checked()).map(AddressWrapper)
     }
 }
 

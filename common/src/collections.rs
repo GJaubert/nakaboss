@@ -85,7 +85,7 @@ impl<K, V> AddressBook<K, V> {
     }
 
     /// Pick a random value in the book.
-    pub fn sample(&self) -> Option<(&K, &V)> {
+    pub fn sample(&mut self) -> Option<(&K, &V)> {
         self.sample_with(|_, _| true)
     }
 
@@ -107,7 +107,7 @@ impl<K, V> AddressBook<K, V> {
     }
 
     /// Cycle through the keys at random. The random cycle repeats ad-infintum.
-    pub fn cycle(&self) -> impl Iterator<Item = &K> {
+    pub fn cycle(&mut self) -> impl Iterator<Item = &K> {
         self.shuffled().map(|(k, _)| k).cycle()
     }
 

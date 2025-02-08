@@ -12,7 +12,7 @@ use nakamoto_common::block::store::{Error, Store};
 use nakamoto_common::block::Height;
 
 /// Append a block to the end of the stream.
-fn put<H: Sized + Encodable, S: Seek + Write, I: Iterator<Item = H>>(
+fn put<H: Sized + Encodable, S: Seek + Write + nakamoto_common::bitcoin::io::Write, I: Iterator<Item = H>>(
     mut stream: S,
     headers: I,
 ) -> Result<Height, Error> {
@@ -20,7 +20,7 @@ fn put<H: Sized + Encodable, S: Seek + Write, I: Iterator<Item = H>>(
     let size = std::mem::size_of::<H>();
 
     for header in headers {
-        pos += header.consensus_encode(&mut stream)? as u64;
+        pos += header.consensus_encode(&mut stream).expect("consensus encoded success") as u64;
     }
     Ok(pos / size as u64)
 }
@@ -168,7 +168,7 @@ impl<H: 'static + Copy + Encodable + Decodable> Store for File<H> {
 
     /// Append a block to the end of the file.
     fn put<I: Iterator<Item = Self::Header>>(&mut self, headers: I) -> Result<Height, Error> {
-        self::put(&mut self.file, headers)
+        self::put(&self.file, headers)
     }
 
     /// Get the block at the given height. Returns `io::ErrorKind::UnexpectedEof` if
@@ -251,23 +251,22 @@ impl<H: 'static + Copy + Encodable + Decodable> Store for File<H> {
 #[cfg(test)]
 mod test {
     use std::{io, iter};
-
-    use nakamoto_common::bitcoin::TxMerkleNode;
+    use nakamoto_common::bitcoin::{CompactTarget, TxMerkleNode};
     use nakamoto_common::bitcoin_hashes::Hash;
     use nakamoto_common::block::BlockHash;
 
     use super::{Error, File, Height, Store};
-    use crate::block::BlockHeader;
+    use crate::block::Header;
 
     const HEADER_SIZE: usize = 80;
 
-    fn store(path: &str) -> File<BlockHeader> {
+    fn store(path: &str) -> File<Header> {
         let tmp = tempfile::tempdir().unwrap();
-        let genesis = BlockHeader {
-            version: 1,
+        let genesis = Header {
+            version: nakamoto_common::bitcoin::blockdata::block::Version::ONE,
             prev_blockhash: BlockHash::all_zeros(),
             merkle_root: TxMerkleNode::all_zeros(),
-            bits: 0x2ffffff,
+            bits: CompactTarget::from_consensus(0x2ffffff),
             time: 39123818,
             nonce: 0,
         };
@@ -277,13 +276,13 @@ mod test {
 
     #[test]
     fn test_put_get() {
-        let mut store = store("headers.db");
+        let mut store: File<Header> = store("headers.db");
 
-        let header = BlockHeader {
-            version: 1,
-            prev_blockhash: store.genesis.block_hash(),
+        let header = Header {
+            version: nakamoto_common::bitcoin::blockdata::block::Version::ONE,
+            prev_blockhash: store.genesis.prev_blockhash,
             merkle_root: TxMerkleNode::all_zeros(),
-            bits: 0x2ffffff,
+            bits: CompactTarget::from_consensus(0x2ffffff),
             time: 1842918273,
             nonce: 312143,
         };
@@ -307,20 +306,20 @@ mod test {
 
     #[test]
     fn test_put_get_batch() {
-        let mut store = store("headers.db");
+        let mut store: File<Header> = store("headers.db");
 
         assert_eq!(store.len().unwrap(), 1);
 
         let count = 32;
-        let header = BlockHeader {
-            version: 1,
-            prev_blockhash: store.genesis().block_hash(),
+        let header = Header {
+            version: nakamoto_common::bitcoin::blockdata::block::Version::ONE,
+            prev_blockhash: store.genesis().prev_blockhash,
             merkle_root: TxMerkleNode::all_zeros(),
-            bits: 0x2ffffff,
+            bits: CompactTarget::from_consensus(0x2ffffff),
             time: 1842918273,
             nonce: 0,
         };
-        let iter = (0..count).map(|i| BlockHeader { nonce: i, ..header });
+        let iter = (0..count).map(|i| Header { nonce: i, ..header });
         let headers = iter.clone().collect::<Vec<_>>();
 
         // Put all headers into the store and check that we can retrieve them.
@@ -353,13 +352,13 @@ mod test {
             assert_eq!(store.len().unwrap(), h as usize + 1);
 
             // We can now overwrite the block at position `h + 1`.
-            let header = BlockHeader {
+            let header = Header {
                 nonce: 49219374,
                 ..header
             };
             let height = store.put(iter::once(header)).unwrap();
 
-            assert!(header != headers[height as usize]);
+            assert_ne!(header, headers[height as usize]);
 
             assert_eq!(height, h + 1);
             assert_eq!(store.get(height).unwrap(), header);
@@ -373,18 +372,18 @@ mod test {
 
     #[test]
     fn test_iter() {
-        let mut store = store("headers.db");
+        let mut store: File<Header> = store("headers.db");
 
         let count = 32;
-        let header = BlockHeader {
-            version: 1,
-            prev_blockhash: store.genesis().block_hash(),
+        let header = Header {
+            version: nakamoto_common::bitcoin::blockdata::block::Version::ONE,
+            prev_blockhash: store.genesis().prev_blockhash,
             merkle_root: TxMerkleNode::all_zeros(),
-            bits: 0x2ffffff,
+            bits: CompactTarget::from_consensus(0x2ffffff),
             time: 1842918273,
             nonce: 0,
         };
-        let iter = (0..count).map(|i| BlockHeader { nonce: i, ..header });
+        let iter = (0..count).map(|i| Header { nonce: i, ..header });
         let headers = iter.clone().collect::<Vec<_>>();
 
         store.put(iter).unwrap();
@@ -402,25 +401,25 @@ mod test {
 
     #[test]
     fn test_corrupt_file() {
-        let mut store = store("headers.db");
+        let mut store: File<Header> = store("headers.db");
 
         store.check().expect("checking always works");
         store.heal().expect("healing when there is no corruption");
 
         let headers = &[
-            BlockHeader {
-                version: 1,
-                prev_blockhash: store.genesis().block_hash(),
+            Header {
+                version: nakamoto_common::bitcoin::blockdata::block::Version::ONE,
+                prev_blockhash: store.genesis().prev_blockhash,
                 merkle_root: TxMerkleNode::all_zeros(),
-                bits: 0x2ffffff,
+                bits: CompactTarget::from_consensus(0x2ffffff),
                 time: 1842918273,
                 nonce: 312143,
             },
-            BlockHeader {
-                version: 1,
+            Header {
+                version: nakamoto_common::bitcoin::blockdata::block::Version::ONE,
                 prev_blockhash: BlockHash::all_zeros(),
                 merkle_root: TxMerkleNode::all_zeros(),
-                bits: 0x1ffffff,
+                bits: CompactTarget::from_consensus(0x1ffffff),
                 time: 1842918920,
                 nonce: 913716378,
             },
@@ -430,7 +429,7 @@ mod test {
 
         assert_eq!(store.len().unwrap(), 3);
 
-        let size = std::mem::size_of::<BlockHeader>();
+        let size = std::mem::size_of::<Header>();
         assert_eq!(size, HEADER_SIZE);
 
         // Intentionally corrupt the file, by truncating it by 32 bytes.

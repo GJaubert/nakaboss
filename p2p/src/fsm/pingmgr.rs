@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::net;
 
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
 use nakamoto_common::block::time::{Clock, LocalDuration, LocalTime};
 use nakamoto_common::collections::HashMap;
 

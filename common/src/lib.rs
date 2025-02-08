@@ -7,6 +7,7 @@ pub mod network;
 pub mod p2p;
 
 pub use bitcoin;
+pub use bitcoin_num;
 pub use bitcoin_hashes;
 pub use nakamoto_net as net;
 pub use nonempty;

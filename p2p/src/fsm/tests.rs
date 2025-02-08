@@ -1,4 +1,5 @@
 #![cfg(test)]
+#[allow(unused_imports)]
 pub mod peer;
 
 mod simulations;
@@ -7,6 +8,7 @@ use std::io;
 use std::iter;
 use std::net;
 use std::ops::Bound;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use log::*;
@@ -14,7 +16,7 @@ use log::*;
 use super::event::TxStatus;
 use super::{addrmgr, cbfmgr, peermgr, pingmgr, syncmgr};
 use super::{
-    chan, network::Network, BlockHash, BlockHeader, Command, Config, DisconnectReason, Event,
+    chan, network::Network, BlockHash, Header, Command, Config, DisconnectReason, Event,
     HashSet, Height, Io, Limits, NetworkMessage, PeerId, RawNetworkMessage, ServiceFlags,
     VersionMessage,
 };
@@ -22,12 +24,11 @@ use super::{PROTOCOL_VERSION, USER_AGENT};
 
 use peer::{Peer, PeerDummy};
 
-use nakamoto_common::bitcoin::network::message_blockdata::GetHeadersMessage;
-use nakamoto_common::bitcoin::network::message_blockdata::Inventory;
-use nakamoto_common::bitcoin::network::message_filter::CFilter;
-use nakamoto_common::bitcoin::network::message_filter::{CFHeaders, GetCFHeaders, GetCFilters};
-use nakamoto_common::bitcoin::network::Address;
-use nakamoto_common::bitcoin_hashes::hex::FromHex;
+use nakamoto_common::bitcoin::p2p::message_blockdata::GetHeadersMessage;
+use nakamoto_common::bitcoin::p2p::message_blockdata::Inventory;
+use nakamoto_common::bitcoin::p2p::message_filter::CFilter;
+use nakamoto_common::bitcoin::p2p::message_filter::{CFHeaders, GetCFHeaders, GetCFilters};
+use nakamoto_common::bitcoin::p2p::{Address, Magic};
 use nakamoto_common::block::time::Clock as _;
 use nakamoto_net::simulator::{Options, Peer as _, Simulation};
 use nakamoto_net::{Link, LocalDuration, LocalTime, StateMachine as _};
@@ -37,7 +38,6 @@ use quickcheck_macros::quickcheck;
 use nakamoto_chain::block::cache::BlockCache;
 use nakamoto_chain::block::store;
 use nakamoto_chain::store::Genesis;
-
 use nakamoto_common::block::filter::FilterHeader;
 use nakamoto_common::block::time::{AdjustedTime, RefClock};
 use nakamoto_common::block::tree::BlockReader as _;
@@ -56,7 +56,7 @@ use nakamoto_test::BITCOIN_HEADERS;
 use nakamoto_test::logger;
 
 pub type Protocol = super::StateMachine<
-    BlockCache<store::Memory<BlockHeader>>,
+    BlockCache<store::Memory<Header>>,
     model::FilterCache,
     HashMap<net::IpAddr, KnownAddress>,
     RefClock<AdjustedTime<PeerId>>,
@@ -170,9 +170,7 @@ fn test_inv_getheaders() {
     let remote: PeerId = ([241, 19, 44, 18], 8333).into();
 
     // Some hash for a nonexistent block.
-    let hash =
-        BlockHash::from_hex("0000000000b7b2c71f2a345e3a4fc328bf5bbb436012afca590b1a11466e2206")
-            .unwrap();
+    let hash = BlockHash::from_str("0000000000b7b2c71f2a345e3a4fc328bf5bbb436012afca590b1a11466e2206").unwrap();
 
     peer.connect_addr(&remote, Link::Outbound);
     peer.received(&remote, NetworkMessage::Inv(vec![Inventory::Block(hash)]));
@@ -195,10 +193,7 @@ fn test_bad_magic() {
     peer.connect_addr(&remote, Link::Outbound);
     peer.received_raw(
         &remote,
-        RawNetworkMessage {
-            magic: 999,
-            payload: NetworkMessage::Ping(1),
-        },
+        RawNetworkMessage::new(Magic::from_bytes(999u32.to_be_bytes()), NetworkMessage::Ping(1))
     );
 
     peer.outputs()
@@ -254,7 +249,7 @@ fn test_maintain_connections() {
             })
             .expect("Alice connects to a new peer");
 
-        assert!(addr != *peer);
+        assert_ne!(addr, *peer);
         assert!(addrs.remove(&addr));
     }
     assert!(addrs.is_empty());
@@ -267,8 +262,7 @@ fn test_getheaders_retry() {
 
     // Some hash for a nonexistent block.
     let hash =
-        BlockHash::from_hex("0000000000b7b2c71f2a345e3a4fc328bf5bbb436012afca590b1a11466e2206")
-            .unwrap();
+        BlockHash::from_str("0000000000b7b2c71f2a345e3a4fc328bf5bbb436012afca590b1a11466e2206").unwrap();
 
     let mut alice = Peer::genesis("alice", [49, 40, 43, 40], network, vec![], rng);
     let peers = [
@@ -837,14 +831,14 @@ fn test_submit_transactions() {
 
     let (transmit, receive) = chan::bounded(1);
     let tx = gen::transaction(&mut rng);
-    let wtxid = tx.txid();
+    let wtxid = tx.compute_txid();
     let inventory = vec![Inventory::Transaction(wtxid)];
     alice.connect(&remote2, Link::Outbound);
     alice.command(Command::SubmitTransaction(tx.clone(), transmit));
 
     let remotes = receive.recv().unwrap().unwrap();
     assert_eq!(Vec::from(remotes), vec![remote1.addr]);
-    assert!(alice.protocol.invmgr.contains(&tx.wtxid()));
+    assert!(alice.protocol.invmgr.contains(&tx.compute_wtxid()));
 
     alice.tock();
     alice
@@ -946,12 +940,12 @@ fn test_inv_partial_broadcast() {
     alice.elapse(LocalDuration::from_secs(3));
     alice.received(
         &remote1,
-        NetworkMessage::GetData(vec![Inventory::Transaction(tx1.txid())]),
+        NetworkMessage::GetData(vec![Inventory::Transaction(tx1.compute_txid())]),
     );
     // The second peer asks only for the second inventory item.
     alice.received(
         &remote2,
-        NetworkMessage::GetData(vec![Inventory::Transaction(tx2.txid())]),
+        NetworkMessage::GetData(vec![Inventory::Transaction(tx2.compute_txid())]),
     );
 
     let messages = alice.writes().collect::<Vec<_>>();
@@ -959,7 +953,7 @@ fn test_inv_partial_broadcast() {
         .iter()
         .find(|(a, msg)| {
             matches! {
-                msg, NetworkMessage::Tx(tx) if tx.txid() == tx1.txid() && a == &remote1
+                msg, NetworkMessage::Tx(tx) if tx.compute_txid() == tx1.compute_txid() && a == &remote1
             }
         })
         .expect("Alice responds with only the requested inventory to peer#1");
@@ -967,7 +961,7 @@ fn test_inv_partial_broadcast() {
         .iter()
         .find(|(a, msg)| {
             matches! {
-                msg, NetworkMessage::Tx(tx) if tx.txid() == tx2.txid() && a == &remote2
+                msg, NetworkMessage::Tx(tx) if tx.compute_txid() == tx2.compute_txid() && a == &remote2
             }
         })
         .expect("Alice responds with only the requested inventory to peer#2");
@@ -983,7 +977,7 @@ fn test_inv_partial_broadcast() {
         .find(|(a, m)| {
             matches! {
                 m, NetworkMessage::Inv(inv)
-                if inv.first() == Some(&Inventory::Transaction(tx2.txid())) && a == &remote1
+                if inv.first() == Some(&Inventory::Transaction(tx2.compute_txid())) && a == &remote1
             }
         })
         .expect("Alice re-sends the missing inv to peer#1");
@@ -992,7 +986,7 @@ fn test_inv_partial_broadcast() {
         .find(|(a, m)| {
             matches! {
                 m, NetworkMessage::Inv(inv)
-                if inv.first() == Some(&Inventory::Transaction(tx1.txid())) && a == &remote2
+                if inv.first() == Some(&Inventory::Transaction(tx1.compute_txid())) && a == &remote2
             }
         })
         .expect("Alice re-sends the missing inv to peer#2");
@@ -1000,11 +994,11 @@ fn test_inv_partial_broadcast() {
     // Now the peers ask for the remaining inventories.
     alice.received(
         &remote1,
-        NetworkMessage::GetData(vec![Inventory::Transaction(tx2.txid())]),
+        NetworkMessage::GetData(vec![Inventory::Transaction(tx2.compute_txid())]),
     );
     alice.received(
         &remote2,
-        NetworkMessage::GetData(vec![Inventory::Transaction(tx1.txid())]),
+        NetworkMessage::GetData(vec![Inventory::Transaction(tx1.compute_txid())]),
     );
 
     // More time passes.
@@ -1059,8 +1053,8 @@ fn test_confirmed_transaction() {
     alice.command(Command::SubmitTransaction(tx2.clone(), transmit));
     alice.tock();
 
-    assert!(alice.protocol.invmgr.contains(&tx1.wtxid()));
-    assert!(alice.protocol.invmgr.contains(&tx2.wtxid()));
+    assert!(alice.protocol.invmgr.contains(&tx1.compute_wtxid()));
+    assert!(alice.protocol.invmgr.contains(&tx2.compute_wtxid()));
 
     alice.protocol.invmgr.get_block(blk1.block_hash());
     alice.protocol.invmgr.get_block(blk2.block_hash());
@@ -1079,7 +1073,7 @@ fn test_confirmed_transaction() {
         .find(|e| {
             matches! {
                 e, Event::TxStatusChanged { txid, status: TxStatus::Confirmed { block, .. } }
-                if *block == blk1.block_hash() && *txid == tx1.txid()
+                if *block == blk1.block_hash() && *txid == tx1.compute_txid()
             }
         })
         .expect("Alice emits the first 'Confirmed' event");
@@ -1097,7 +1091,7 @@ fn test_confirmed_transaction() {
         .find(|e| {
             matches! {
                 e, Event::TxStatusChanged { txid, status: TxStatus::Confirmed { block, .. } }
-                if *block == blk2.block_hash() && *txid == tx2.txid()
+                if *block == blk2.block_hash() && *txid == tx2.compute_txid()
             }
         })
         .expect("Alice emits the second 'Confirmed' event");
@@ -1170,7 +1164,7 @@ fn test_submitted_transaction_filtering() {
     alice.command(Command::SubmitTransaction(tx.clone(), transmit));
     alice.tock();
 
-    assert!(alice.protocol.invmgr.contains(&tx.wtxid()));
+    assert!(alice.protocol.invmgr.contains(&tx.compute_wtxid()));
 
     // The next block will have the matching transaction.
     let matching = gen::block_with(&chain.last().header, vec![tx.clone()], &mut rng);
@@ -1224,7 +1218,7 @@ fn test_submitted_transaction_filtering() {
     alice.tock();
     alice
         .events()
-        .find(|e| matches!(e, Event::TxStatusChanged { txid, .. } if *txid == tx.txid()))
+        .find(|e| matches!(e, Event::TxStatusChanged { txid, .. } if *txid == tx.compute_txid()))
         .unwrap();
 
     assert!(alice.protocol.invmgr.is_empty(), "The mempool is empty");
@@ -1234,7 +1228,7 @@ fn test_submitted_transaction_filtering() {
             .cbfmgr
             .rescan
             .transactions
-            .contains_key(&tx.txid()),
+            .contains_key(&tx.compute_txid()),
         "The transaction is no longer watched"
     );
 }
@@ -1337,7 +1331,7 @@ fn test_transaction_reverted_reconfirm() {
                 matches!(
                     e,
                     Event::TxStatusChanged { txid, status: TxStatus::Confirmed { .. } }
-                    if *txid == tx.txid()
+                    if *txid == tx.compute_txid()
                 )
             })
             .expect("The transaction is confirmed");
@@ -1369,12 +1363,12 @@ fn test_transaction_reverted_reconfirm() {
                 matches!(
                     e,
                     Event::TxStatusChanged { txid, status: TxStatus::Reverted { .. } }
-                    if *txid == tx.txid()
+                    if *txid == tx.compute_txid()
                 )
             })
             .expect("The transaction is reverted");
 
-        assert!(alice.protocol.invmgr.contains(&tx.wtxid()));
+        assert!(alice.protocol.invmgr.contains(&tx.compute_wtxid()));
 
         alice.tock();
         alice
@@ -1436,7 +1430,7 @@ fn test_transaction_reverted_reconfirm() {
                 matches!(
                     e,
                     Event::TxStatusChanged { txid, status: TxStatus::Confirmed { block, .. } }
-                    if *txid == tx.txid() && block == &fork_matching.block_hash()
+                    if *txid == tx.compute_txid() && block == &fork_matching.block_hash()
                 )
             })
             .expect("The transaction is re-confirmed");

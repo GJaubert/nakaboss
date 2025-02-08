@@ -12,8 +12,8 @@ use termion::event::Event;
 
 use nakamoto_client as client;
 use nakamoto_client::handle::Handle;
-use nakamoto_common::bitcoin::Address;
-use nakamoto_common::bitcoin::{OutPoint, Script, Transaction, TxOut};
+use nakamoto_common::bitcoin::{Address, ScriptBuf};
+use nakamoto_common::bitcoin::{OutPoint, Transaction, TxOut};
 use nakamoto_common::block::Height;
 
 use crate::error::Error;
@@ -63,19 +63,19 @@ impl<H: Handle> Wallet<H> {
     }
 
     /// Apply a transaction to the wallet's UTXO set.
-    pub fn apply(&mut self, tx: &Transaction, scripts: &[Script]) {
+    pub fn apply(&mut self, tx: &Transaction, scripts: &Vec<ScriptBuf>) {
         // Look for outputs.
         for (vout, output) in tx.output.iter().enumerate() {
             // Received coin. Mark the address as *used*, and update the balance for that
             // address.
             if scripts.contains(&output.script_pubkey) {
                 // Update UTXOs.
-                let txid = tx.txid();
+                let txid = tx.compute_txid();
                 let addr =
-                    Address::from_script(&output.script_pubkey, self.network.into()).unwrap();
+                    Address::from_script(&output.script_pubkey, self.network.params()).unwrap();
 
                 self.db
-                    .add_utxo(txid, vout as u32, addr, output.value)
+                    .add_utxo(txid, vout as u32, addr, output.value.to_sat())
                     .unwrap();
             }
         }
@@ -137,7 +137,7 @@ impl<H: Handle> Wallet<H> {
             ui::refresh(&mut self.ui, &self.db, &mut term)?;
         } else {
             // Start a re-scan from the birht height, which keeps scanning as new blocks arrive.
-            self.client.rescan(birth.., watch.iter().cloned())?;
+            self.client.rescan(birth.., watch.clone().into_iter().map(|sb| sb.into_boxed_script()))?;
 
             // Loading...
             loop {
@@ -232,7 +232,7 @@ impl<H: Handle> Wallet<H> {
     fn handle_client_event<W: io::Write>(
         &mut self,
         event: client::Event,
-        watch: &[Script],
+        watch: &Vec<ScriptBuf>,
         offline: bool,
         term: &mut W,
     ) -> Result<ControlFlow<()>, Error> {

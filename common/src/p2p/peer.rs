@@ -5,8 +5,8 @@ use std::net;
 
 use microserde as serde;
 
-use bitcoin::network::address::Address;
-use bitcoin::network::constants::ServiceFlags;
+use bitcoin::p2p::Address;
+use bitcoin::p2p::ServiceFlags;
 
 use crate::block::time::Clock;
 use crate::net::time::LocalTime;

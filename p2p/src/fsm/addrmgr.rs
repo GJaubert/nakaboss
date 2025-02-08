@@ -4,9 +4,9 @@
 #![warn(missing_docs)]
 use std::net;
 
-use nakamoto_common::bitcoin::network::address::Address;
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::Address;
+use nakamoto_common::bitcoin::p2p::ServiceFlags;
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
 use nakamoto_common::block::time::Clock;
 use nakamoto_common::block::time::{LocalDuration, LocalTime};
 use nakamoto_common::block::BlockTime;
@@ -978,8 +978,8 @@ mod tests {
     fn test_insert() {
         use std::collections::HashMap;
 
-        use nakamoto_common::bitcoin::network::address::Address;
-        use nakamoto_common::bitcoin::network::constants::ServiceFlags;
+        use nakamoto_common::bitcoin::p2p::address::Address;
+        use nakamoto_common::bitcoin::p2p::ServiceFlags;
         use nakamoto_common::block::time::LocalTime;
         use nakamoto_common::p2p::peer::Source;
 
@@ -1032,8 +1032,8 @@ mod tests {
     fn test_sample() {
         use std::collections::HashMap;
 
-        use nakamoto_common::bitcoin::network::address::Address;
-        use nakamoto_common::bitcoin::network::constants::ServiceFlags;
+        use nakamoto_common::bitcoin::p2p::Address;
+        use nakamoto_common::bitcoin::p2p::ServiceFlags;
         use nakamoto_common::block::time::{LocalDuration, LocalTime};
         use nakamoto_common::p2p::peer::Source;
 

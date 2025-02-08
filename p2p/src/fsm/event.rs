@@ -2,12 +2,12 @@
 use std::sync::Arc;
 use std::{error, fmt, io, net};
 
-use nakamoto_common::bitcoin::network::address::Address;
-use nakamoto_common::bitcoin::network::constants::ServiceFlags;
-use nakamoto_common::bitcoin::network::message::NetworkMessage;
+use nakamoto_common::bitcoin::p2p::Address;
+use nakamoto_common::bitcoin::p2p::ServiceFlags;
+use nakamoto_common::bitcoin::p2p::message::NetworkMessage;
 use nakamoto_common::bitcoin::{Transaction, Txid};
 use nakamoto_common::block::filter::BlockFilter;
-use nakamoto_common::block::{Block, BlockHash, BlockHeader, Height};
+use nakamoto_common::block::{Block, BlockHash, Header, Height};
 use nakamoto_common::nonempty::NonEmpty;
 use nakamoto_common::p2p::peer::Source;
 use nakamoto_net::Disconnect;
@@ -112,7 +112,7 @@ pub enum Event {
     /// A block was added to the main chain.
     BlockConnected {
         /// Block header.
-        header: BlockHeader,
+        header: Header,
         /// Height of the block.
         height: Height,
     },
@@ -121,7 +121,7 @@ pub enum Event {
     /// Mark all transactions belonging to this block as *unconfirmed*.
     BlockDisconnected {
         /// Header of the block.
-        header: BlockHeader,
+        header: Header,
         /// Height of the block when it was part of the main chain.
         height: Height,
     },
@@ -157,9 +157,9 @@ pub enum Event {
         /// New tip height.
         height: Height,
         /// Block headers connected to the active chain.
-        connected: NonEmpty<(Height, BlockHeader)>,
+        connected: NonEmpty<(Height, Header)>,
         /// Block headers reverted from the active chain.
-        reverted: Vec<(Height, BlockHeader)>,
+        reverted: Vec<(Height, Header)>,
         /// Set if this import triggered a chain reorganization.
         reorg: bool,
     },
@@ -440,7 +440,7 @@ impl fmt::Display for TxStatus {
                 block, height
             ),
             Self::Reverted { transaction } => {
-                write!(fmt, "transaction {} has been reverted", transaction.txid())
+                write!(fmt, "transaction {} has been reverted", transaction.compute_txid())
             }
             Self::Stale { replaced_by, block } => write!(
                 fmt,
@@ -453,8 +453,8 @@ impl fmt::Display for TxStatus {
 
 #[cfg(test)]
 mod test {
+    use nakamoto_common::bitcoin::hashes::Hash;
     use super::*;
-    use nakamoto_common::bitcoin_hashes::Hash;
     use nakamoto_test::block::gen;
 
     #[test]

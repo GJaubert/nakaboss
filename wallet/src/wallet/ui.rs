@@ -454,7 +454,7 @@ pub fn draw_utxo_tab<D: db::Read, W: io::Write>(db: &D, term: &mut W) -> Result<
             style::NoFaint,
             addr,
             color::Fg(color::LightCyan),
-            Balance(txout.value),
+            Balance(txout.value.to_sat()),
         )?;
     }
     Ok(())

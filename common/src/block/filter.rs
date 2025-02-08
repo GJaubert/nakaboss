@@ -3,12 +3,11 @@
 
 use std::ops::RangeInclusive;
 
-use bitcoin_hashes::Hash;
 use thiserror::Error;
 
 pub use bitcoin::hash_types::{FilterHash, FilterHeader};
-pub use bitcoin::util::bip158::BlockFilter;
-
+pub use bitcoin::bip158::BlockFilter;
+use bitcoin::hashes::Hash;
 use super::Height;
 use crate::block::store::{self, Genesis};
 use crate::network::Network;
@@ -17,20 +16,23 @@ impl Genesis for FilterHeader {
     /// Filter header for the genesis block.
     ///
     /// ```
+    /// use std::ops::Deref;
+    /// use std::str::FromStr;
     /// use nakamoto_common::block::filter::{FilterHash, FilterHeader};
     /// use nakamoto_common::block::store::Genesis as _;
     /// use nakamoto_common::network::Network;
-    /// use bitcoin_hashes::{hex::FromHex, sha256d};
+    /// use bitcoin_hashes::{sha256d, Hash};
     ///
     /// let genesis = FilterHeader::genesis(Network::Testnet);
     ///
     /// assert_eq!(
-    ///     genesis.as_hash(),
-    ///     sha256d::Hash::from_hex(
+    ///     genesis.as_raw_hash().to_byte_array(),
+    ///     sha256d::Hash::from_str(
     ///         "21584579b7eb08997773e5aeff3a7f932700042d0ed2a6129012b7d7ae81b750"
-    ///     ).unwrap()
+    ///     ).unwrap().to_byte_array()
     /// );
     /// ```
+    ///
     fn genesis(network: Network) -> Self {
         let filter = BlockFilter::genesis(network);
         filter.filter_header(&FilterHeader::all_zeros())

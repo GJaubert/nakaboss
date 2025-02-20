@@ -29,6 +29,10 @@ pub struct Options {
     #[argh(switch)]
     pub regtest: bool,
 
+    /// use P2P v2
+    #[argh(switch)]
+    pub p2p_v2: bool,
+
     /// only connect to IPv4 addresses (default: false)
     #[argh(switch, short = '4')]
     pub ipv4: bool,
@@ -77,7 +81,7 @@ fn main() {
         vec![Domain::IPV4, Domain::IPV6]
     };
 
-    if let Err(e) = nakamoto_node::run(&opts.connect, &opts.listen, opts.root, &domains, network) {
+    if let Err(e) = nakamoto_node::run(&opts.connect, &opts.listen, opts.root, &domains, network, opts.p2p_v2) {
         log::error!(target: "node", "Exiting: {}", e);
         std::process::exit(1);
     }

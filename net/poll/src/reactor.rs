@@ -15,19 +15,23 @@ use std::fmt::Debug;
 use std::io;
 use std::io::prelude::*;
 use std::net;
+use std::net::TcpStream;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time;
 use std::time::SystemTime;
-
+use bip324::{Handshake, Network, PacketType, PacketWriter, Role};
+use nakamoto_p2p::{DisconnectReason, Event};
 use crate::fallible;
 use crate::socket::Socket;
 use crate::time::TimeoutManager;
+use crate::bip324_info;
+use crate::bip324_info::Bip324Info;
 
 /// Maximum time to wait when reading from a socket.
-const READ_TIMEOUT: time::Duration = time::Duration::from_secs(6);
+const READ_TIMEOUT: time::Duration = time::Duration::from_secs(3);
 /// Maximum time to wait when writing to a socket.
-const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(3);
+const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(6);
 /// Maximum amount of time to wait for i/o.
 const WAIT_TIMEOUT: LocalDuration = LocalDuration::from_mins(60);
 /// Socket read buffer size.
@@ -59,6 +63,7 @@ impl nakamoto_net::Waker for Waker {
 
 /// A single-threaded non-blocking reactor.
 pub struct Reactor<R: Write + Read, Id: PeerId = net::SocketAddr> {
+    is_v2: bool,
     peers: HashMap<Id, Socket<R>>,
     connecting: HashSet<Id>,
     sources: popol::Sources<Source<Id>>,
@@ -66,6 +71,8 @@ pub struct Reactor<R: Write + Read, Id: PeerId = net::SocketAddr> {
     timeouts: TimeoutManager<()>,
     shutdown: chan::Receiver<()>,
     listening: chan::Sender<net::SocketAddr>,
+    pub network: Network,
+    bip324_info: HashMap<Id, bip324_info::Bip324Info>,
 }
 
 /// The `R` parameter represents the underlying stream type, eg. `net::TcpStream`.
@@ -76,7 +83,10 @@ impl<R: Write + Read + AsRawFd, Id: PeerId> Reactor<R, Id> {
         self.sources
             .register(Source::Peer(addr.clone()), &stream, popol::interest::ALL);
         self.peers
-            .insert(addr, Socket::from(stream, socket_addr, link));
+            .insert(addr.clone(), Socket::from(stream, socket_addr, link));
+        if self.is_v2 {
+            self.bip324_info.insert(addr, Bip324Info::default());
+        }
     }
 
     /// Unregister a peer from the reactor.
@@ -91,8 +101,19 @@ impl<R: Write + Read + AsRawFd, Id: PeerId> Reactor<R, Id> {
         self.connecting.remove(&addr);
         self.peers.remove(&addr);
         self.sources.unregister(&Source::Peer(addr.clone()));
+        if self.is_v2 {
+            self.bip324_info.remove(&addr);
+        }
 
         service.disconnected(&addr, reason);
+    }
+
+    fn set_p2p_v2(&mut self, flag: bool) {
+        self.is_v2 = flag;
+    }
+
+    fn set_network(&mut self, network: Network) {
+        self.network = network;
     }
 }
 
@@ -105,11 +126,14 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         listening: chan::Sender<net::SocketAddr>,
     ) -> Result<Self, io::Error> {
         let peers = HashMap::new();
-
+        let bip324_info = HashMap::new();
+        let is_v2 = false;
         let mut sources = popol::Sources::new();
         let waker = Waker::new(&mut sources)?;
         let timeouts = TimeoutManager::new(LocalDuration::from_secs(1));
         let connecting = HashSet::new();
+        // This is the default, but it will be set via set_network()
+        let network = Network::Testnet;
 
         Ok(Self {
             peers,
@@ -119,6 +143,9 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
             timeouts,
             shutdown,
             listening,
+            bip324_info,
+            is_v2,
+            network,
         })
     }
 
@@ -155,7 +182,15 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         let local_time = SystemTime::now().into();
         service.initialize(local_time);
 
-        self.process(&mut service, &mut publisher, local_time);
+        info!(
+            target: "reactor",
+            "P2P mode: v{} running on network: {}",
+            if self.is_v2 { "2" } else { "1" },
+            self.network
+        );
+
+        let mut io_queue: Vec<Io<Vec<u8>, Event, DisconnectReason, Id>> = Vec::new();
+        self.process(&mut service, &mut publisher, local_time, &mut io_queue);
 
         // I/O readiness events populated by `popol::Sources::wait_timeout`.
         let mut events = Vec::with_capacity(32);
@@ -202,7 +237,6 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     self.sources.unregister(&ev.key);
                                     continue;
                                 }
-
                                 if ev.is_writable() {
                                     self.handle_writable(addr.clone(), &ev.key, &mut service)?;
                                 }
@@ -230,9 +264,8 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     let local_addr = conn.local_addr()?;
                                     let link = Link::Inbound;
 
-                                    self.register_peer(addr.clone(), conn, link);
-
-                                    service.connected(addr, &local_addr, link);
+                                    self.register_peer(addr.clone(), conn.try_clone()?, link);
+                                    service.connected(addr.clone(), &local_addr, link);
                                 }
                             },
                             Source::Waker => {
@@ -270,7 +303,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                 }
                 Err(err) => return Err(err.into()),
             }
-            self.process(&mut service, &mut publisher, local_time);
+            self.process(&mut service, &mut publisher, local_time, &mut io_queue);
         }
     }
 
@@ -280,25 +313,67 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
     fn waker(&self) -> Self::Waker {
         self.waker.clone()
     }
+
+    fn configure_network(&mut self, network: String, is_v2: bool) {
+        let network = match network.as_str() {
+            "mainnet" => Network::Bitcoin,
+            "testnet" => Network::Testnet,
+            "regtest" => Network::Regtest,
+            "signet" => Network::Signet,
+            _ => Network::Bitcoin,
+        };
+        self.set_network(network);
+        self.set_p2p_v2(is_v2);
+    }
 }
 
 impl<Id: PeerId> Reactor<net::TcpStream, Id> {
     /// Process service state machine outputs.
-    fn process<S, E>(&mut self, service: &mut S, publisher: &mut E, local_time: LocalTime)
+    fn process<S, E>(
+        &mut self,
+        service: &mut S,
+        publisher: &mut E,
+        local_time: LocalTime,
+        io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>
+    )
     where
         S: Service<Id>,
         E: Publisher<S::Event>,
         S::DisconnectReason: Into<Disconnect<S::DisconnectReason>>,
     {
+        if self.is_v2 {
+            self.check_and_handle_handshake_timeouts(local_time, io_queue);
+            self.filter_io_queue(io_queue);
+        }
+
         // Note that there may be messages destined for a peer that has since been
         // disconnected.
         while let Some(out) = service.next() {
             match out {
                 Io::Write(addr, bytes) => {
-                    if let Some(socket) = self.peers.get_mut(&addr) {
-                        if let Some(source) = self.sources.get_mut(&Source::Peer(addr)) {
-                            socket.push(&bytes);
-                            source.set(popol::interest::WRITE);
+                    if let Some(socket) = self.peers.get_mut(&addr.clone()) {
+                        if let Some(source) = self.sources.get_mut(&Source::Peer(addr.clone())) {
+
+                            if let Some(bip324_info) = &mut self.bip324_info.get_mut(&addr) {
+                                if let Some(packet_handler) = &mut bip324_info.packet_handler {
+                                    let packet = packet_handler
+                                        .writer()
+                                        .encrypt_packet(
+                                            bytes.clone().as_slice(),
+                                            None,
+                                            PacketType::Genuine
+                                        )
+                                        .unwrap();
+                                    socket.push(&packet);
+                                } else {
+                                    io_queue.push(Io::Write(addr, bytes));
+                                }
+                                source.set(popol::interest::WRITE);
+                            } else {
+                                socket.push(&bytes);
+                                source.set(popol::interest::WRITE);
+                            }
+
                         }
                     }
                 }
@@ -309,9 +384,21 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                     match self::dial(&socket_addr) {
                         Ok(stream) => {
                             trace!("{:#?}", stream);
-
-                            self.register_peer(addr.clone(), stream, Link::Outbound);
+                            let link = Link::Outbound;
+                            self.register_peer(addr.clone(), stream.try_clone().unwrap(), link);
                             self.connecting.insert(addr.clone());
+
+                            if self.is_v2 {
+                                let mut socket = Socket::from(stream, socket_addr, link);
+                                if let Some(bip324_info) = self.bip324_info.get_mut(&addr) {
+                                    Self::send_elli_swift(
+                                        bip324_info,
+                                        Role::Initiator,
+                                        &mut socket,
+                                        LocalTime::now(),
+                                    );
+                                }
+                            }
 
                             service.attempted(&addr);
                         }
@@ -351,58 +438,6 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         }
     }
 
-    fn handle_readable<S>(&mut self, addr: Id, service: &mut S)
-    where
-        S: Service<Id>,
-    {
-        // Nb. If the socket was readable and writable at the same time, and it was disconnected
-        // during an attempt to write, it will no longer be registered and hence available
-        // for reads.
-        if let Some(socket) = self.peers.get_mut(&addr) {
-            let mut buffer = [0; READ_BUFFER_SIZE];
-
-            let socket_addr = addr.to_socket_addr();
-            trace!("{}: Socket is readable", socket_addr);
-
-            // Nb. Since `poll`, which this reactor is based on, is *level-triggered*,
-            // we will be notified again if there is still data to be read on the socket.
-            // Hence, there is no use in putting this socket read in a loop, as the second
-            // invocation would likely block.
-            match socket.read(&mut buffer) {
-                Ok(count) => {
-                    if count > 0 {
-                        trace!("{}: Read {} bytes", socket_addr, count);
-
-                        service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
-                    } else {
-                        trace!("{}: Read 0 bytes", socket_addr);
-                        // If we get zero bytes read as a return value, it means the peer has
-                        // performed an orderly shutdown.
-                        socket.disconnect().ok();
-                        self.unregister_peer(
-                            addr,
-                            Disconnect::ConnectionError(Arc::new(io::Error::from(
-                                io::ErrorKind::ConnectionReset,
-                            ))),
-                            service,
-                        );
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    // This shouldn't normally happen, since this function is only called
-                    // when there's data on the socket. We leave it here in case external
-                    // conditions change.
-                }
-                Err(err) => {
-                    trace!("{}: Read error: {}", socket_addr, err.to_string());
-
-                    socket.disconnect().ok();
-                    self.unregister_peer(addr, Disconnect::ConnectionError(Arc::new(err)), service);
-                }
-            }
-        }
-    }
-
     fn handle_writable<S: Service<Id>>(
         &mut self,
         addr: Id,
@@ -425,7 +460,6 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
 
             service.connected(addr.clone(), &local_addr, socket.link);
         }
-
         match socket.flush() {
             // In this case, we've written all the data, we
             // are no longer interested in writing to this
@@ -437,10 +471,10 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
             // our interest to `WRITE` to be notified when the
             // socket is ready to write again.
             Err(err)
-                if [io::ErrorKind::WouldBlock, io::ErrorKind::WriteZero].contains(&err.kind()) =>
-            {
-                source.set(popol::interest::WRITE);
-            }
+            if [io::ErrorKind::WouldBlock, io::ErrorKind::WriteZero].contains(&err.kind()) =>
+                {
+                    source.set(popol::interest::WRITE);
+                }
             Err(err) => {
                 error!(target: "net", "{}: Write error: {}", socket_addr, err.to_string());
 
@@ -450,6 +484,344 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         }
         Ok(())
     }
+
+    fn handle_readable<S>(&mut self, addr: Id, service: &mut S)
+    where
+        S: Service<Id>,
+    {
+        // Nb. If the socket was readable and writable at the same time, and it was disconnected
+        // during an attempt to write, it will no longer be registered and hence available
+        // for reads.
+        if let Some(mut socket) = self.peers.get_mut(&addr) {
+            let mut buffer = [0; READ_BUFFER_SIZE];
+
+            let socket_addr = addr.to_socket_addr();
+            trace!("{}: Socket is readable", socket_addr);
+
+            // Nb. Since `poll`, which this reactor is based on, is *level-triggered*,
+            // we will be notified again if there is still data to be read on the socket.
+            // Hence, there is no use in putting this socket read in a loop, as the second
+            // invocation would likely block.
+
+            match socket.read(&mut buffer) {
+                Ok(count) if count <= 0 => {
+                    trace!("{}: Read 0 bytes", socket_addr);
+                    // Peer has performed an orderly shutdown
+                    socket.disconnect().ok();
+                    self.unregister_peer(
+                        addr.clone(),
+                        Disconnect::ConnectionError(Arc::new(io::Error::from(io::ErrorKind::ConnectionReset))),
+                        service,
+                    );
+                    return;
+                },
+                Ok(mut count) => {
+                    trace!("{}: Read {} bytes", socket_addr, count);
+                    if let Some(bip324_info) = self.bip324_info.get_mut(&addr) {
+                        while count > 0 {
+                            if bip324_info.key_received.is_none() {
+                                if self.network.magic()
+                                    == nakamoto_common::bitcoin::p2p::Magic::from_bytes(
+                                    buffer[..4].try_into().expect("first 4 bytes"),
+                                ) {
+                                    self.bip324_info.remove(&addr);
+                                    service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
+                                    return;
+                                }
+                                bip324_info.key_received = Some(buffer[..bip324_info::ELLI_SWIFT_KEY_SIZE].to_vec());
+                                if socket.link == Link::Inbound {
+                                    Self::send_elli_swift(
+                                        bip324_info,
+                                        Role::Responder,
+                                        &mut socket,
+                                        LocalTime::now()
+                                    );
+                                }
+                                Self::create_and_send_terminator(bip324_info, socket);
+                                count -= bip324_info::ELLI_SWIFT_KEY_SIZE;
+                                buffer.rotate_left(bip324_info::ELLI_SWIFT_KEY_SIZE);
+                            } else if bip324_info.garbage_received.len() < bip324_info::MAX_GARBAGE_BUFFER_BYTES
+                            && bip324_info.packet_handler.is_none() {
+                                match Self::handle_garbage(
+                                    &mut buffer,
+                                    &mut count,
+                                    bip324_info
+                                ) {
+                                    Ok(()) => {
+                                        info!(target: "reactor", "handshake done with {}", socket_addr);
+                                    },
+                                    Err(bip324::Error::CiphertextTooSmall) => {}
+                                    Err(_) => {
+                                        self.bip324_info.remove(&addr);
+                                        break;
+                                    }
+                                }
+                            } else {
+                                Self::handle_encrypted_message(
+                                    &buffer,
+                                    count,
+                                    bip324_info,
+                                    &addr,
+                                    service
+                                );
+                                count = 0;
+                            }
+                        }
+                    } else {
+                        service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
+                    }
+
+                },
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    // This shouldn't normally happen, since this function is only called
+                    // when there's data on the socket. We leave it here in case external
+                    // conditions change.
+                },
+                Err(err) => {
+                    trace!("{}: Read error: {}", socket_addr, err);
+                    socket.disconnect().ok();
+                    self.unregister_peer(addr, Disconnect::ConnectionError(Arc::new(err)), service);
+                }
+            }
+        }
+    }
+
+    fn handle_garbage(
+        buffer: &mut [u8],
+        count: &mut usize,
+        bip324_info: &mut Bip324Info,
+    ) -> Result<(), bip324::Error> {
+        let reading_bytes_number = bip324_info::MAX_GARBAGE_BUFFER_BYTES.min(*count);
+        bip324_info.garbage_received.extend(buffer[..reading_bytes_number].to_vec());
+
+        if let Some(mut handshake) = bip324_info.handshake.take() {
+            return match handshake.authenticate_garbage_and_version(&bip324_info.garbage_received) {
+                Ok(()) => {
+                    bip324_info.packet_handler = Some(handshake.finalize()?);
+                    *count -= reading_bytes_number;
+                    buffer.rotate_left(reading_bytes_number);
+                    Ok(())
+                }
+                Err(bip324::Error::CiphertextTooSmall) => {
+                    *count -= reading_bytes_number;
+                    // remove rotate left to optimize
+                    buffer.rotate_left(reading_bytes_number);
+                    Err(bip324::Error::CiphertextTooSmall)
+                }
+                Err(_) => Err(bip324::Error::HandshakeOutOfOrder)
+            }
+        }
+        if bip324_info.garbage_received.len() < bip324_info::MAX_GARBAGE_BUFFER_BYTES {
+            Err(bip324::Error::CiphertextTooSmall)
+        } else {
+            Err(bip324::Error::TooMuchGarbage)
+        }
+    }
+
+    fn handle_encrypted_message<S>(
+        buffer: &[u8],
+        count: usize,
+        bip324_info: &mut Bip324Info,
+        addr: &Id,
+        service: &mut S
+    ) where
+        S: Service<Id>,
+    {
+        if let Some(packet_handler) = &mut bip324_info.packet_handler {
+            let message = &buffer[..count];
+            let pending_bytes = bip324_info.message_buffer.pending_bytes;
+            let mut index = 0;
+            let mut result_buffer = vec![];
+
+            if pending_bytes > 0 {
+                if pending_bytes <= count {
+                    bip324_info.message_buffer.buffer.extend_from_slice(&message[..pending_bytes]);
+
+                    if let Ok(result_message) = packet_handler.reader().decrypt_payload(
+                        bip324_info.message_buffer.buffer.clone()[..].try_into().unwrap(),
+                        None
+                    ) {
+                        if result_message.packet_type() == PacketType::Genuine {
+                            result_buffer.extend_from_slice(&result_message.contents());
+                        }
+                    }
+
+                    bip324_info.message_buffer.buffer.clear();
+                    bip324_info.message_buffer.pending_bytes = 0;
+                    index = pending_bytes;
+                } else {
+                    bip324_info.message_buffer.buffer.extend_from_slice(message);
+                    bip324_info.message_buffer.pending_bytes -= count;
+                    index = count;
+                }
+            }
+
+            while index < count {
+                if index + bip324_info::DEFAULT_SIZE_BYTES_V2 > count {
+                    bip324_info.message_buffer.pending_bytes = count - index;
+                    bip324_info.message_buffer.buffer.extend_from_slice(&message[index..count]);
+                    break;
+                }
+
+                let mut current_buffer = vec![];
+                for i in index..index+bip324_info::DEFAULT_SIZE_BYTES_V2 {
+                    current_buffer.push(message[i]);
+                }
+
+                let length = packet_handler.reader().decypt_len(current_buffer[..].try_into().unwrap());
+                current_buffer.clear();
+
+                let next_index = index + bip324_info::DEFAULT_SIZE_BYTES_V2;
+                let finish = next_index + length;
+
+                if finish > count {
+                    bip324_info.message_buffer.pending_bytes = finish - count;
+                    bip324_info.message_buffer.buffer.extend_from_slice(&message[next_index..count]);
+                    break;
+                } else {
+                    for i in next_index..finish {
+                        current_buffer.push(message[i]);
+                    }
+
+                    if let Ok(result_message) = packet_handler.reader().decrypt_payload(
+                        current_buffer[..].try_into().unwrap(),
+                        None
+                    ) {
+                        result_buffer.extend_from_slice(&result_message.contents());
+                    }
+
+                    index = finish;
+                    current_buffer.clear();
+                }
+            }
+
+            if !result_buffer.is_empty() {
+                service.message_received(addr, Cow::Borrowed(&result_buffer));
+            }
+        } else {
+            service.message_received(addr, Cow::Borrowed(&buffer[..count]));
+        }
+    }
+
+    fn send_elli_swift(
+        bip324_info: &mut Bip324Info,
+        role: Role,
+        socket: &mut Socket<TcpStream>,
+        time: LocalTime,
+    ) {
+        let mut elli_swift_buffer = vec![0u8; 64];
+        match Handshake::new(Network::Regtest, role, None, &mut elli_swift_buffer) {
+            Ok(handshake) => {
+
+                bip324_info.key_sent = Some(elli_swift_buffer.to_vec());
+                bip324_info.handshake = Some(Box::from(handshake));
+                bip324_info.handshake_started = Some(time);
+
+                socket.push(&elli_swift_buffer);
+                socket.flush().unwrap_or({});
+            },
+            Err(_) => {},
+        };
+    }
+
+    fn create_and_send_terminator(bip324_info: &mut Bip324Info, socket: &mut Socket<TcpStream>) {
+        let num_version_packet_bytes = PacketWriter::required_packet_allocation(&bip324_info::VERSION_CONTENT);
+        let mut terminator_and_version_buffer =
+            vec![0u8; bip324_info::GARBAGE_TERMINATOR_BYTES + num_version_packet_bytes];
+        if let Some(handshake) = &mut bip324_info.handshake {
+            handshake.complete_materials(
+                bip324_info.key_received.clone().unwrap().try_into().unwrap(),
+                &mut terminator_and_version_buffer,
+                None
+            ).unwrap();
+        }
+        socket.push(&terminator_and_version_buffer);
+        socket.flush().expect("flushed");
+        bip324_info.terminator_sent = Some(terminator_and_version_buffer.to_vec());
+    }
+
+    fn check_and_handle_handshake_timeouts(
+        &mut self,
+        local_time: LocalTime,
+        io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>,
+    ) {
+        let mut fallback_peers = Vec::new();
+
+        for (addr, bip324_info) in &mut self.bip324_info {
+            if bip324_info.key_received.is_some() || bip324_info.handshake_started.is_none() {
+                continue;
+            }
+
+            let started_at = bip324_info.handshake_started.unwrap();
+            let elapsed = local_time - started_at;
+
+            if elapsed >= bip324_info::BIP324_HANDSHAKE_TIMEOUT {
+                fallback_peers.push(addr.clone());
+            }
+        };
+
+        for addr in fallback_peers {
+            if let Some(socket) = self.peers.get_mut(&addr) {
+                if let Some(source) = self.sources.get_mut(&Source::Peer(addr.clone())) {
+                    self.bip324_info.remove(&addr);
+
+                    io_queue.retain(|io| match io {
+                        Io::Write(io_addr, bytes) if io_addr == &addr => {
+                            socket.push(bytes);
+                            socket.flush().expect("flushed");
+                            source.set(popol::interest::WRITE);
+                            return false;
+                        }
+                        _ => true
+                    });
+
+                    info!(target: "net", "{}: Fallback to v1 protocol after handshake timeout",
+                     addr.to_socket_addr());
+                }
+            }
+        }
+    }
+
+    fn filter_io_queue(&mut self, io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>) {
+        io_queue.retain(|io| match io {
+            Io::Write(addr, bytes) => {
+                let socket = match self.peers.get_mut(&addr) {
+                    Some(socket) => socket,
+                    None => return false,
+                };
+
+                let source = match self.sources.get_mut(&Source::Peer(addr.clone())) {
+                    Some(source) => source,
+                    None => return false,
+                };
+
+                if let Some(bip324_info) = &mut self.bip324_info.get_mut(&addr) {
+                    if let Some(packet_handler) = &mut bip324_info.packet_handler {
+                        let packet = packet_handler
+                            .writer()
+                            .encrypt_packet(
+                                bytes.clone().as_slice(),
+                                None,
+                                PacketType::Genuine
+                            )
+                            .unwrap();
+
+                        socket.push(&packet);
+                        source.set(popol::interest::WRITE);
+                        return false;
+                    } else {
+                        true
+                    }
+                } else {
+                    socket.push(&bytes);
+                    source.set(popol::interest::WRITE);
+                    return false;
+                }
+            }
+            _ => false,
+        });
+    }
+
 }
 
 /// Connect to a peer given a remote address.

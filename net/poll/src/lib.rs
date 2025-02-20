@@ -36,6 +36,7 @@ pub use reactor::{Reactor, Waker};
 
 #[cfg(test)]
 mod fallible;
+mod bip324_info;
 
 /// Makes a function randomly fail with the given error.
 #[macro_export]

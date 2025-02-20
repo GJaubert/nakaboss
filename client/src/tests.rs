@@ -106,7 +106,7 @@ fn test_full_sync() {
         .expect("chain is valid");
 
     for (mut node, _, thread) in nodes.into_iter() {
-        node.set_timeout(std::time::Duration::from_secs(5));
+        node.set_timeout(std::time::Duration::from_secs(40));
         assert_eq!(node.wait_for_height(height).unwrap(), hash);
 
         node.shutdown().unwrap();

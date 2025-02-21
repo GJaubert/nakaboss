@@ -29,7 +29,6 @@ use nakamoto_common::block::time::{AdjustedClock, Clock, LocalDuration, LocalTim
 use nakamoto_common::block::Height;
 use nakamoto_common::collections::{HashMap, HashSet};
 use nakamoto_net as network;
-
 use crate::fsm::addrmgr;
 use crate::fsm::DisconnectReason;
 use crate::Event;

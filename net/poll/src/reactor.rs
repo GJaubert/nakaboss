@@ -13,7 +13,6 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::io;
-use std::io::ErrorKind;
 use std::io::prelude::*;
 use std::net;
 use std::net::{SocketAddr, TcpStream};
@@ -22,7 +21,7 @@ use std::sync::Arc;
 use std::time;
 use std::time::SystemTime;
 use bip324::{Handshake, Network, PacketHandler, PacketWriter, ProtocolError, ProtocolFailureSuggestion, Role};
-use nakamoto_common::bitcoin::key::Secp256k1;
+use libc::link;
 use crate::fallible;
 use crate::socket::Socket;
 use crate::time::TimeoutManager;
@@ -172,6 +171,10 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         // Timeouts populated by `TimeoutManager::wake`.
         let mut timeouts = Vec::with_capacity(32);
 
+        let mut backup_events = Vec::with_capacity(1);
+
+        let io_backup = service.next();
+
         loop {
             let timeout = self
                 .timeouts
@@ -188,6 +191,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
 
             let result = self.sources.wait_timeout(&mut events, timeout); // Blocking.
             let local_time = SystemTime::now().into();
+            events.extend(backup_events.drain(..));
 
             service.tick(local_time);
 
@@ -220,6 +224,12 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                 if ev.is_readable() {
                                     self.handle_readable(addr.clone(), &mut service);
                                 }
+                                // I can assume that key will be sent here
+                                // if self.hand_shaken.get(&addr).is_some_and(|v| !v) {
+                                //     println!("adding event back");
+                                //     backup_events.push(ev);
+                                //     self.hand_shaken.insert(addr.clone(), true);
+                                // }
                             }
                             Source::Listener => loop {
                                 if let Some(ref listener) = listener {
@@ -243,8 +253,18 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     let link = Link::Inbound;
 
                                     self.register_peer(addr.clone(), conn, link);
-                                    //let packet = self.create_v2_connection(socket_addr, Network::Regtest, Role::Responder, conn_copy);
-                                    service.connected(addr, &local_addr, link);
+                                    service.connected(addr.clone(), &local_addr, link);
+
+                                    let mut ellswift_buffer = vec![0u8; 64];
+                                    match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
+                                        Ok(handshake) => {
+                                            println!("Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                            //self.hand_shaken.insert(addr.clone(), true);
+                                        },
+                                        Err(e) => continue,
+                                    };
+                                    let mut socket = self.peers.get_mut(&addr).unwrap();
+                                    socket.push(&ellswift_buffer);
                                 }
                             },
                             Source::Waker => {
@@ -304,20 +324,34 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
     {
         // Note that there may be messages destined for a peer that has since been
         // disconnected.
-        while let Some(out) = service.next() {
+        // Backup is needed in case V2 handshake is not finished, to prevent sending any non-encrypted
+        // byte and not skipping the intended event
+        let mut backup = service.next();
+        while let Some(out) = if backup.is_some() {
+            backup.take()
+        } else {
+            service.next()
+        } {
             match out {
                 Io::Write(addr, mut bytes) => {
                     let addr_clone = addr.clone();
+                    let clone = addr_clone.clone();
                     if let Some(socket) = self.peers.get_mut(&addr) {
                         if let Some(source) = self.sources.get_mut(&Source::Peer(addr)) {
-                            if self.hand_shaken.get(&addr_clone).is_some_and(|v| !v) {
-                                let mut ellswift_buffer = vec![0u8; 64];
-                                match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
-                                    Ok(handshake) => bytes = ellswift_buffer,
-                                    Err(e) => continue,
-                                };
-                                println!("Llave: {:?}", bytes);
-                            }
+                            // if self.hand_shaken.get(&addr_clone).is_some_and(|v| !v) {
+                            //     let mut ellswift_buffer = vec![0u8; 64];
+                            //     match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
+                            //         Ok(handshake) => {
+                            //             println!("Writing key to {:?}: {:?}", addr_clone,  ellswift_buffer);
+                            //             self.hand_shaken.insert(addr_clone.clone(), true);
+                            //             backup = Some(Io::Write(addr_clone, bytes.clone()));
+                            //             bytes = ellswift_buffer;
+                            //         },
+                            //         Err(e) => continue,
+                            //     };
+                            // }
+                            println!("Sending data to {:?}: {:?}", clone, bytes);
+                            // Prevenir que esto se envie hasta que el handshake este hehco y ya
                             socket.push(&bytes);
                             source.set(popol::interest::WRITE);
                         }
@@ -331,9 +365,19 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                         Ok(stream) => {
                             trace!("{:#?}", stream);
                             // TODO: BIP 324 register peer with given packethandler
-
                             self.register_peer(addr.clone(), stream.try_clone().unwrap(), Link::Outbound);
                             self.connecting.insert(addr.clone());
+                            println!("Connecting and sending key {}...", socket_addr);
+                            let mut ellswift_buffer = vec![0u8; 64];
+                            match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
+                                Ok(handshake) => {
+                                    println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                    self.hand_shaken.insert(addr.clone(), true);
+                                },
+                                Err(e) => continue,
+                            };
+                            let mut socket = self.peers.get_mut(&addr).unwrap();
+                            socket.push(&ellswift_buffer);
 
                             service.attempted(&addr);
                         }
@@ -394,8 +438,13 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 Ok(count) => {
                     if count > 0 {
                         trace!("{}: Read {} bytes", socket_addr, count);
+                        println!("Received from {} {:?}", socket_addr, &buffer[..count]);
                         if self.hand_shaken.get(&addr).is_some_and(|v| !v) {
-                            println!("Received {:?}", &buffer[..count]);
+                            //println!("Received from {} {:?}", socket_addr, &buffer[..count]);
+                            // Wrap following in function
+                            // Create tuples in hand_shaken to store unfinished handshakes
+                            // if Inbound: create key Responder, send back, and finalize handshake
+                            // If Outbound: read this key and merge it with already take created key and continue handshake
                         } else {
                             service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
                         }

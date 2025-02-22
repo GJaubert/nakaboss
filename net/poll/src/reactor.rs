@@ -393,7 +393,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                     let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
                                     bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
                                     bip324_info.handshake = Some(Box::from(handshake));
-                                    //self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
+                                    self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
                                 },
                                 Err(e) => continue,
                             };

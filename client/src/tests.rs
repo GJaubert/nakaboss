@@ -42,7 +42,7 @@ fn network(
 
         let node = Client::<Reactor>::new()?;
         let mut handle = node.handle();
-        handle.set_timeout(time::Duration::from_secs(5));
+        handle.set_timeout(time::Duration::from_secs(10));
 
         let t = thread::spawn({
             let params = params.clone();

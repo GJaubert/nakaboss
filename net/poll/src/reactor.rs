@@ -22,6 +22,7 @@ use std::time;
 use std::time::SystemTime;
 use bip324::{Handshake, Network, PacketHandler, PacketWriter, ProtocolError, ProtocolFailureSuggestion, Role};
 use libc::link;
+use nakamoto_common::bitcoin::key::Keypair;
 use crate::fallible;
 use crate::socket::Socket;
 use crate::time::TimeoutManager;
@@ -59,6 +60,26 @@ impl nakamoto_net::Waker for Waker {
     }
 }
 
+pub struct Bip324Info {
+    pub v2: bool,
+    pub key_sent: Option<Vec<u8>>,
+    pub key_received: Option<Vec<u8>>,
+    pub packet_handler: Option<PacketHandler>,
+    handshake: Option<Box<Handshake<'static>>>
+}
+
+impl Default for Bip324Info {
+    fn default() -> Self {
+        Self {
+            v2: false,
+            key_sent: None,
+            key_received: None,
+            packet_handler: None,
+            handshake: None,
+        }
+    }
+}
+
 /// A single-threaded non-blocking reactor.
 pub struct Reactor<R: Write + Read, Id: PeerId = net::SocketAddr> {
     peers: HashMap<Id, Socket<R>>,
@@ -68,8 +89,7 @@ pub struct Reactor<R: Write + Read, Id: PeerId = net::SocketAddr> {
     timeouts: TimeoutManager<()>,
     shutdown: chan::Receiver<()>,
     listening: chan::Sender<net::SocketAddr>,
-    packet_handlers: HashMap<Id, PacketHandler>,
-    hand_shaken: HashMap<Id, bool>,
+    bip324_info: HashMap<Id, Bip324Info>,
 }
 
 /// The `R` parameter represents the underlying stream type, eg. `net::TcpStream`.
@@ -81,7 +101,7 @@ impl<R: Write + Read + AsRawFd, Id: PeerId> Reactor<R, Id> {
             .register(Source::Peer(addr.clone()), &stream, popol::interest::ALL);
         self.peers
             .insert(addr.clone(), Socket::from(stream, socket_addr, link));
-        self.hand_shaken.insert(addr, false);
+        self.bip324_info.insert(addr, Bip324Info::default());
     }
 
     /// Unregister a peer from the reactor.
@@ -110,8 +130,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         listening: chan::Sender<net::SocketAddr>,
     ) -> Result<Self, io::Error> {
         let peers = HashMap::new();
-        let packet_handlers = HashMap::new();
-        let hand_shaken = HashMap::new();
+        let bip324_info = HashMap::new();
 
         let mut sources = popol::Sources::new();
         let waker = Waker::new(&mut sources)?;
@@ -126,8 +145,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
             timeouts,
             shutdown,
             listening,
-            packet_handlers,
-            hand_shaken,
+            bip324_info,
         })
     }
 
@@ -200,7 +218,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                     trace!("Woke up with {n} source(s) ready");
                     // esto solo empieza hasta que haya un handshake V2. Hacer un loop parecido para el handshake
                     // Que uno escriba la key, el otro la reciba y tal, una ordenr por loop
-                    println!("Events: {:?}", events);
+                    //println!("Events: {:?}", events);
                     for mut ev in events.drain(..) {
                         match &ev.key {
                             Source::Peer(addr) => {
@@ -246,7 +264,6 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     let addr = Id::from(socket_addr);
                                     trace!("{}: Accepting peer connection", socket_addr);
 
-                                    let conn_copy = conn.try_clone()?;
                                     conn.set_nonblocking(true)?;
 
                                     let local_addr = conn.local_addr()?;
@@ -258,13 +275,14 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     let mut ellswift_buffer = vec![0u8; 64];
                                     match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
                                         Ok(handshake) => {
-                                            println!("Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
-                                            //self.hand_shaken.insert(addr.clone(), true);
+                                            println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                            let bip_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
+                                            bip_info.key_sent = Option::from(ellswift_buffer.to_vec());
+                                            bip_info.handshake = Some(Box::from(handshake));
                                         },
                                         Err(e) => continue,
                                     };
-                                    let mut socket = self.peers.get_mut(&addr).unwrap();
-                                    socket.push(&ellswift_buffer);
+                                    self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
                                 }
                             },
                             Source::Waker => {
@@ -350,7 +368,6 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             //         Err(e) => continue,
                             //     };
                             // }
-                            println!("Sending data to {:?}: {:?}", clone, bytes);
                             // Prevenir que esto se envie hasta que el handshake este hehco y ya
                             socket.push(&bytes);
                             source.set(popol::interest::WRITE);
@@ -364,20 +381,22 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                     match self::dial(&socket_addr) {
                         Ok(stream) => {
                             trace!("{:#?}", stream);
+
                             // TODO: BIP 324 register peer with given packethandler
                             self.register_peer(addr.clone(), stream.try_clone().unwrap(), Link::Outbound);
                             self.connecting.insert(addr.clone());
-                            println!("Connecting and sending key {}...", socket_addr);
+
                             let mut ellswift_buffer = vec![0u8; 64];
                             match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
                                 Ok(handshake) => {
                                     println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
-                                    self.hand_shaken.insert(addr.clone(), true);
+                                    let bip_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
+                                    bip_info.key_sent = Option::from(ellswift_buffer.to_vec());
+                                    bip_info.handshake = Some(Box::from(handshake));
                                 },
                                 Err(e) => continue,
                             };
-                            let mut socket = self.peers.get_mut(&addr).unwrap();
-                            socket.push(&ellswift_buffer);
+                            self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
 
                             service.attempted(&addr);
                         }
@@ -438,13 +457,11 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 Ok(count) => {
                     if count > 0 {
                         trace!("{}: Read {} bytes", socket_addr, count);
-                        println!("Received from {} {:?}", socket_addr, &buffer[..count]);
-                        if self.hand_shaken.get(&addr).is_some_and(|v| !v) {
-                            //println!("Received from {} {:?}", socket_addr, &buffer[..count]);
-                            // Wrap following in function
-                            // Create tuples in hand_shaken to store unfinished handshakes
-                            // if Inbound: create key Responder, send back, and finalize handshake
-                            // If Outbound: read this key and merge it with already take created key and continue handshake
+                        let bip_info = self.bip324_info.get_mut(&addr).unwrap();
+                        if bip_info.key_received.is_none() { // Añadir si es v2 y si hay packet handler
+                            println!("Received key from {} {:?}", socket_addr, &buffer[..count]);
+                            bip_info.key_received = Option::from(buffer[..count].to_vec());
+                            // Si Error::V1Protocol, llamar a message_received() y hacer V1
                         } else {
                             service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
                         }

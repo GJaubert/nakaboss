@@ -21,16 +21,14 @@ use std::sync::Arc;
 use std::time;
 use std::time::SystemTime;
 use bip324::{Handshake, Network, PacketHandler, PacketWriter, ProtocolError, ProtocolFailureSuggestion, Role};
-use libc::link;
-use nakamoto_common::bitcoin::key::Keypair;
 use crate::fallible;
 use crate::socket::Socket;
 use crate::time::TimeoutManager;
 
 /// Maximum time to wait when reading from a socket.
-const READ_TIMEOUT: time::Duration = time::Duration::from_secs(12);
+const READ_TIMEOUT: time::Duration = time::Duration::from_secs(6);
 /// Maximum time to wait when writing to a socket.
-const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(12);
+const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(3);
 /// Maximum amount of time to wait for i/o.
 const WAIT_TIMEOUT: LocalDuration = LocalDuration::from_mins(60);
 /// Socket read buffer size.
@@ -189,7 +187,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         // Timeouts populated by `TimeoutManager::wake`.
         let mut timeouts = Vec::with_capacity(32);
 
-        let mut backup_events = Vec::with_capacity(1);
+        //let mut backup_events = Vec::with_capacity(1);
 
         let io_backup = service.next();
 
@@ -209,7 +207,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
 
             let result = self.sources.wait_timeout(&mut events, timeout); // Blocking.
             let local_time = SystemTime::now().into();
-            events.extend(backup_events.drain(..));
+            //events.extend(backup_events.drain(..));
 
             service.tick(local_time);
 
@@ -342,18 +340,9 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
     {
         // Note that there may be messages destined for a peer that has since been
         // disconnected.
-        // Backup is needed in case V2 handshake is not finished, to prevent sending any non-encrypted
-        // byte and not skipping the intended event
-        let mut backup = service.next();
-        while let Some(out) = if backup.is_some() {
-            backup.take()
-        } else {
-            service.next()
-        } {
+        while let Some(out) = service.next() {
             match out {
-                Io::Write(addr, mut bytes) => {
-                    let addr_clone = addr.clone();
-                    let clone = addr_clone.clone();
+                Io::Write(addr, bytes) => {
                     if let Some(socket) = self.peers.get_mut(&addr) {
                         if let Some(source) = self.sources.get_mut(&Source::Peer(addr)) {
                             // if self.hand_shaken.get(&addr_clone).is_some_and(|v| !v) {
@@ -393,7 +382,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                     let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
                                     bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
                                     bip324_info.handshake = Some(Box::from(handshake));
-                                    self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
+                                    //self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
                                 },
                                 Err(e) => continue,
                             };

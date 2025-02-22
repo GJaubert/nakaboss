@@ -109,11 +109,6 @@ pub enum Event {
         /// Reason of misbehavior.
         reason: &'static str,
     },
-    //
-    KeyCreated {
-        addr: PeerId,
-        key: Vec<u8>,
-    },
     /// A block was added to the main chain.
     BlockConnected {
         /// Block header.
@@ -383,9 +378,6 @@ impl fmt::Display for Event {
                     fmt,
                     "Address book exhausted.. fetching new addresses from peers"
                 )
-            }
-            Self::KeyCreated { addr, key } => {
-                write!(fmt, "Sending key to {} key: {:?}", &addr, key)
             }
             Self::Error { error } => {
                 write!(fmt, "Error: {error}")

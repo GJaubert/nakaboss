@@ -275,14 +275,14 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     let mut ellswift_buffer = vec![0u8; 64];
                                     match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
                                         Ok(handshake) => {
-                                            println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
-                                            let bip_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
-                                            bip_info.key_sent = Option::from(ellswift_buffer.to_vec());
-                                            bip_info.handshake = Some(Box::from(handshake));
+                                            //println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                            let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
+                                            bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
+                                            bip324_info.handshake = Some(Box::from(handshake));
+                                            //self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
                                         },
                                         Err(e) => continue,
                                     };
-                                    self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
                                 }
                             },
                             Source::Waker => {
@@ -389,14 +389,14 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             let mut ellswift_buffer = vec![0u8; 64];
                             match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
                                 Ok(handshake) => {
-                                    println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
-                                    let bip_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
-                                    bip_info.key_sent = Option::from(ellswift_buffer.to_vec());
-                                    bip_info.handshake = Some(Box::from(handshake));
+                                    //println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                    let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
+                                    bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
+                                    bip324_info.handshake = Some(Box::from(handshake));
+                                    //self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
                                 },
                                 Err(e) => continue,
                             };
-                            self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
 
                             service.attempted(&addr);
                         }
@@ -457,14 +457,14 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 Ok(count) => {
                     if count > 0 {
                         trace!("{}: Read {} bytes", socket_addr, count);
-                        let bip_info = self.bip324_info.get_mut(&addr).unwrap();
-                        if bip_info.key_received.is_none() { // Añadir si es v2 y si hay packet handler
-                            println!("Received key from {} {:?}", socket_addr, &buffer[..count]);
-                            bip_info.key_received = Option::from(buffer[..count].to_vec());
-                            // Si Error::V1Protocol, llamar a message_received() y hacer V1
-                        } else {
+                        // let bip324_info = self.bip324_info.get_mut(&addr).unwrap();
+                        // if bip324_info.key_received.is_none() { // Añadir si es v2 y si hay packet handler
+                        //     //println!("Received key from {} {:?}", socket_addr, &buffer[..count]);
+                        //     bip324_info.key_received = Option::from(buffer[..count].to_vec());
+                        //     // Si Error::V1Protocol, llamar a message_received() y hacer V1
+                        // } else {
                             service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
-                        }
+                        //}
                     } else {
                         trace!("{}: Read 0 bytes", socket_addr);
                         // If we get zero bytes read as a return value, it means the peer has

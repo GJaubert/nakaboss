@@ -460,7 +460,6 @@ impl<S: Store<Header = BitcoinBlockHeader>> BlockCache<S> {
                 return Err(Error::InvalidBlockPoW);
             }
             Err(bitcoin::block::ValidationError::BadTarget) => {
-                println!("loco paso {:?} {:?}", header.target(), target);
                 return Err(Error::InvalidBlockTarget(header.target(), target));
             }
             Err(_) => unreachable!(),

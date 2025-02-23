@@ -491,7 +491,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                         bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
                                         bip324_info.handshake = Some(Box::from(handshake));
                                         socket.push(&ellswift_buffer);
-                                        //socket.flush().expect("flushed");
+                                        socket.flush().expect("flushed");
                                     },
                                     Err(e) => {},
                                 };

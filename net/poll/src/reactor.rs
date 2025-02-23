@@ -10,17 +10,17 @@ use nakamoto_net::{Link, Service};
 use log::*;
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::io;
 use std::io::prelude::*;
 use std::net;
-use std::net::{SocketAddr, TcpStream};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time;
 use std::time::SystemTime;
 use bip324::{Handshake, Network, PacketHandler, PacketWriter, ProtocolError, ProtocolFailureSuggestion, Role};
+use nakamoto_p2p::{DisconnectReason, Event};
 use crate::fallible;
 use crate::socket::Socket;
 use crate::time::TimeoutManager;
@@ -28,7 +28,7 @@ use crate::time::TimeoutManager;
 /// Maximum time to wait when reading from a socket.
 const READ_TIMEOUT: time::Duration = time::Duration::from_secs(6);
 /// Maximum time to wait when writing to a socket.
-const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(3);
+const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(6);
 /// Maximum amount of time to wait for i/o.
 const WAIT_TIMEOUT: LocalDuration = LocalDuration::from_mins(60);
 /// Socket read buffer size.
@@ -180,16 +180,14 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         let local_time = SystemTime::now().into();
         service.initialize(local_time);
 
-        self.process(&mut service, &mut publisher, local_time);
+
+        let mut io_queue: VecDeque<Io<Vec<u8>, Event, DisconnectReason, Id>> = VecDeque::new();
+        self.process(&mut service, &mut publisher, local_time, &mut io_queue);
 
         // I/O readiness events populated by `popol::Sources::wait_timeout`.
         let mut events = Vec::with_capacity(32);
         // Timeouts populated by `TimeoutManager::wake`.
         let mut timeouts = Vec::with_capacity(32);
-
-        //let mut backup_events = Vec::with_capacity(1);
-
-        let io_backup = service.next();
 
         loop {
             let timeout = self
@@ -207,7 +205,6 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
 
             let result = self.sources.wait_timeout(&mut events, timeout); // Blocking.
             let local_time = SystemTime::now().into();
-            //events.extend(backup_events.drain(..));
 
             service.tick(local_time);
 
@@ -217,7 +214,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                     // esto solo empieza hasta que haya un handshake V2. Hacer un loop parecido para el handshake
                     // Que uno escriba la key, el otro la reciba y tal, una ordenr por loop
                     //println!("Events: {:?}", events);
-                    for mut ev in events.drain(..) {
+                    for ev in events.drain(..) {
                         match &ev.key {
                             Source::Peer(addr) => {
                                 let socket_addr = addr.to_socket_addr();
@@ -270,17 +267,19 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     self.register_peer(addr.clone(), conn, link);
                                     service.connected(addr.clone(), &local_addr, link);
 
-                                    let mut ellswift_buffer = vec![0u8; 64];
-                                    match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
-                                        Ok(handshake) => {
-                                            //println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
-                                            let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
-                                            bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
-                                            bip324_info.handshake = Some(Box::from(handshake));
-                                            //self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
-                                        },
-                                        Err(e) => continue,
-                                    };
+                                    // let mut ellswift_buffer = vec![0u8; 64];
+                                    // match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
+                                    //     Ok(handshake) => {
+                                    //         println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                    //         let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
+                                    //         bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
+                                    //         bip324_info.handshake = Some(Box::from(handshake));
+                                    //         let socket = self.peers.get_mut(&addr).unwrap();
+                                    //         socket.push(&ellswift_buffer);
+                                    //         socket.flush().expect("flushed");
+                                    //     },
+                                    //     Err(e) => continue,
+                                    // };
                                 }
                             },
                             Source::Waker => {
@@ -318,7 +317,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                 }
                 Err(err) => return Err(err.into()),
             }
-            self.process(&mut service, &mut publisher, local_time);
+            self.process(&mut service, &mut publisher, local_time, &mut io_queue);
         }
     }
 
@@ -332,34 +331,61 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
 
 impl<Id: PeerId> Reactor<net::TcpStream, Id> {
     /// Process service state machine outputs.
-    fn process<S, E>(&mut self, service: &mut S, publisher: &mut E, local_time: LocalTime)
+    fn process<S, E>(
+        &mut self,
+        service: &mut S,
+        publisher: &mut E,
+        local_time: LocalTime,
+        io_queue: &mut VecDeque<Io<Vec<u8>, Event, DisconnectReason, Id>>
+    )
     where
         S: Service<Id>,
         E: Publisher<S::Event>,
         S::DisconnectReason: Into<Disconnect<S::DisconnectReason>>,
     {
+        io_queue.retain(|io| match io {
+            Io::Write(addr, bytes) => {
+                let bip324_info = self.bip324_info.get(&addr).unwrap();
+
+                if bip324_info.key_sent.is_some() && bip324_info.key_received.is_some() {
+                    // Tambien añadir que compruebe que hay handshake. De esta manera puedo eliminar el
+                    // flush del handle readable
+                    let socket = match self.peers.get_mut(&addr) {
+                        Some(socket) => socket,
+                        None => return false,
+                    };
+
+                    let source = match self.sources.get_mut(&Source::Peer(addr.clone())) {
+                        Some(source) => source,
+                        None => return false,
+                    };
+
+                    socket.push(bytes);
+                    source.set(popol::interest::WRITE);
+                    return false;
+                }
+
+                true
+            }
+            _ => false,
+        });
+
         // Note that there may be messages destined for a peer that has since been
         // disconnected.
         while let Some(out) = service.next() {
             match out {
                 Io::Write(addr, bytes) => {
-                    if let Some(socket) = self.peers.get_mut(&addr) {
-                        if let Some(source) = self.sources.get_mut(&Source::Peer(addr)) {
-                            // if self.hand_shaken.get(&addr_clone).is_some_and(|v| !v) {
-                            //     let mut ellswift_buffer = vec![0u8; 64];
-                            //     match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
-                            //         Ok(handshake) => {
-                            //             println!("Writing key to {:?}: {:?}", addr_clone,  ellswift_buffer);
-                            //             self.hand_shaken.insert(addr_clone.clone(), true);
-                            //             backup = Some(Io::Write(addr_clone, bytes.clone()));
-                            //             bytes = ellswift_buffer;
-                            //         },
-                            //         Err(e) => continue,
-                            //     };
-                            // }
-                            // Prevenir que esto se envie hasta que el handshake este hehco y ya
-                            socket.push(&bytes);
-                            source.set(popol::interest::WRITE);
+                    if let Some(socket) = self.peers.get_mut(&addr.clone()) {
+                        if let Some(source) = self.sources.get_mut(&Source::Peer(addr.clone())) {
+                            if let Some(bip324_info) = self.bip324_info.get(&addr) {
+                                if bip324_info.key_sent.is_some() && bip324_info.key_received.is_some() {
+                                    socket.push(&bytes);
+                                    source.set(popol::interest::WRITE);
+                                } else {
+                                    io_queue.push_back(Io::Write(addr, bytes));
+                                }
+                            }
+
                         }
                     }
                 }
@@ -378,11 +404,15 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             let mut ellswift_buffer = vec![0u8; 64];
                             match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
                                 Ok(handshake) => {
-                                    //println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                    println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+
                                     let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
                                     bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
                                     bip324_info.handshake = Some(Box::from(handshake));
-                                    //self.peers.get_mut(&addr).unwrap().push(&ellswift_buffer);
+
+                                    let socket = self.peers.get_mut(&addr).unwrap();
+                                    socket.push(&ellswift_buffer);
+                                    //socket.flush().expect("flushed");
                                 },
                                 Err(e) => continue,
                             };
@@ -446,14 +476,29 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 Ok(count) => {
                     if count > 0 {
                         trace!("{}: Read {} bytes", socket_addr, count);
-                        // let bip324_info = self.bip324_info.get_mut(&addr).unwrap();
-                        // if bip324_info.key_received.is_none() { // Añadir si es v2 y si hay packet handler
-                        //     //println!("Received key from {} {:?}", socket_addr, &buffer[..count]);
-                        //     bip324_info.key_received = Option::from(buffer[..count].to_vec());
-                        //     // Si Error::V1Protocol, llamar a message_received() y hacer V1
-                        // } else {
+                        let bip324_info = self.bip324_info.get_mut(&addr).unwrap();
+                        if bip324_info.key_received.is_none() { // Añadir si es v2 y si hay packet handler
+                            println!("Received key from {} {:?}", socket_addr, &buffer[..count]);
+                            bip324_info.key_received = Option::from(buffer[..count].to_vec());
+                            // Si Error::V1Protocol, llamar a message_received() y hacer V1
+
+                            if bip324_info.key_sent.is_none() {
+                                let mut ellswift_buffer = vec![0u8; 64];
+                                match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
+                                    Ok(handshake) => {
+                                        println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                        let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
+                                        bip324_info.key_sent = Option::from(ellswift_buffer.to_vec());
+                                        bip324_info.handshake = Some(Box::from(handshake));
+                                        socket.push(&ellswift_buffer);
+                                        //socket.flush().expect("flushed");
+                                    },
+                                    Err(e) => {},
+                                };
+                            }
+                        } else {
                             service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
-                        //}
+                        }
                     } else {
                         trace!("{}: Read 0 bytes", socket_addr);
                         // If we get zero bytes read as a return value, it means the peer has
@@ -531,90 +576,90 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         Ok(())
     }
 
-    fn create_v2_connection(
-        &mut self,
-        addr: SocketAddr,
-        network: Network,
-        role: Role,
-        stream: TcpStream,
-    ) -> Result<PacketHandler, ProtocolError> {
-        let version_content: [u8; 0] = [];
-        println!("{:?}", self.sources);
-        println!("Source::Peer: {:?}", &Source::Peer(Id::from(addr)));
-        if let Some(source) = self.sources.get_mut(&Source::Peer(Id::from(addr))) {
-             let mut ellswift_buffer = vec![0u8; 64];
-            let mut handshake = match Handshake::new(network, role, None, &mut ellswift_buffer) {
-                Ok(handshake) => handshake,
-                Err(e) => return Err(ProtocolError::Internal(e))
-            };
-            let mut socket = Socket::from(stream, addr, Link::Outbound);
-            //source.set(popol::interest::WRITE);
-            socket.push(&ellswift_buffer);
-            //source.set(popol::interest::ALL);
-            // socket.flush().ok();
-
-            // hasta aqui, no creo que haya que seguir
-            // La clave se ha enviado a modo de mensaje a la otra peer
-            // Ahora toca crear un tipo de input que sea para V2, y que cree el secreto y envie de vuelta el secreto
-            // Toca crear un ultimo input para leer el secreto y crear los packethandlers
-
-            let mut remote_ellswift_buffer = [0u8; 64];
-            //socket.read(&mut remote_ellswift_buffer)?;
-
-            // let num_version_packet_bytes = PacketWriter::required_packet_allocation(&version_content);
-            // let mut terminator_and_version_buffer =
-            //     vec![
-            //         0u8;
-            //         16 + num_version_packet_bytes
-            //     ];
-            // handshake.complete_materials(
-            //     remote_ellswift_buffer,
-            //     &mut terminator_and_version_buffer,
-            //     None,
-            // )?;
-            // println!("------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
-            // //tcp_stream.write_all(&terminator_and_version_buffer).expect("write");
-            // //tcp_stream.flush().expect("flush");
-            //
-            // let mut remote_garbage_and_version_buffer =
-            //     Vec::with_capacity(4096);
-            // loop {
-            //     let mut temp_buffer = [0u8; 4096];
-            //     match tcp_stream.read(&mut temp_buffer) {
-            //         // No data available right now, continue.
-            //         Ok(0) => {
-            //             continue;
-            //         }
-            //         Ok(bytes_read) => {
-            //             remote_garbage_and_version_buffer.extend_from_slice(&temp_buffer[..bytes_read]);
-            //
-            //             match handshake
-            //                 .authenticate_garbage_and_version(&remote_garbage_and_version_buffer)
-            //             {
-            //                 Ok(()) => break,
-            //                 // Not enough data, continue reading.
-            //                 Err(bip324::Error::CiphertextTooSmall) => continue,
-            //                 Err(e) => return Err(ProtocolError::Internal(e)),
-            //             }
-            //         }
-            //         Err(e) => match e.kind() {
-            //             // No data available or interrupted, retry.
-            //             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {
-            //                 continue;
-            //             }
-            //             _ => return Err(ProtocolError::Io(e, ProtocolFailureSuggestion::Abort)),
-            //         },
-            //     }
-            // }
-
-            let packet_handler = handshake.finalize()?;
-
-            Ok(packet_handler)
-        } else {
-             Err(ProtocolError::Internal(bip324::Error::CiphertextTooSmall))
-        }
-
-    }
+    // fn create_v2_connection(
+    //     &mut self,
+    //     addr: SocketAddr,
+    //     network: Network,
+    //     role: Role,
+    //     stream: TcpStream,
+    // ) -> Result<PacketHandler, ProtocolError> {
+    //     let version_content: [u8; 0] = [];
+    //     println!("{:?}", self.sources);
+    //     println!("Source::Peer: {:?}", &Source::Peer(Id::from(addr)));
+    //     if let Some(source) = self.sources.get_mut(&Source::Peer(Id::from(addr))) {
+    //          let mut ellswift_buffer = vec![0u8; 64];
+    //         let mut handshake = match Handshake::new(network, role, None, &mut ellswift_buffer) {
+    //             Ok(handshake) => handshake,
+    //             Err(e) => return Err(ProtocolError::Internal(e))
+    //         };
+    //         let mut socket = Socket::from(stream, addr, Link::Outbound);
+    //         //source.set(popol::interest::WRITE);
+    //         socket.push(&ellswift_buffer);
+    //         //source.set(popol::interest::ALL);
+    //         // socket.flush().ok();
+    //
+    //         // hasta aqui, no creo que haya que seguir
+    //         // La clave se ha enviado a modo de mensaje a la otra peer
+    //         // Ahora toca crear un tipo de input que sea para V2, y que cree el secreto y envie de vuelta el secreto
+    //         // Toca crear un ultimo input para leer el secreto y crear los packethandlers
+    //
+    //         let mut remote_ellswift_buffer = [0u8; 64];
+    //         //socket.read(&mut remote_ellswift_buffer)?;
+    //
+    //         // let num_version_packet_bytes = PacketWriter::required_packet_allocation(&version_content);
+    //         // let mut terminator_and_version_buffer =
+    //         //     vec![
+    //         //         0u8;
+    //         //         16 + num_version_packet_bytes
+    //         //     ];
+    //         // handshake.complete_materials(
+    //         //     remote_ellswift_buffer,
+    //         //     &mut terminator_and_version_buffer,
+    //         //     None,
+    //         // )?;
+    //         // println!("------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
+    //         // //tcp_stream.write_all(&terminator_and_version_buffer).expect("write");
+    //         // //tcp_stream.flush().expect("flush");
+    //         //
+    //         // let mut remote_garbage_and_version_buffer =
+    //         //     Vec::with_capacity(4096);
+    //         // loop {
+    //         //     let mut temp_buffer = [0u8; 4096];
+    //         //     match tcp_stream.read(&mut temp_buffer) {
+    //         //         // No data available right now, continue.
+    //         //         Ok(0) => {
+    //         //             continue;
+    //         //         }
+    //         //         Ok(bytes_read) => {
+    //         //             remote_garbage_and_version_buffer.extend_from_slice(&temp_buffer[..bytes_read]);
+    //         //
+    //         //             match handshake
+    //         //                 .authenticate_garbage_and_version(&remote_garbage_and_version_buffer)
+    //         //             {
+    //         //                 Ok(()) => break,
+    //         //                 // Not enough data, continue reading.
+    //         //                 Err(bip324::Error::CiphertextTooSmall) => continue,
+    //         //                 Err(e) => return Err(ProtocolError::Internal(e)),
+    //         //             }
+    //         //         }
+    //         //         Err(e) => match e.kind() {
+    //         //             // No data available or interrupted, retry.
+    //         //             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {
+    //         //                 continue;
+    //         //             }
+    //         //             _ => return Err(ProtocolError::Io(e, ProtocolFailureSuggestion::Abort)),
+    //         //         },
+    //         //     }
+    //         // }
+    //
+    //         let packet_handler = handshake.finalize()?;
+    //
+    //         Ok(packet_handler)
+    //     } else {
+    //          Err(ProtocolError::Internal(bip324::Error::CiphertextTooSmall))
+    //     }
+    //
+    // }
 }
 
 /// Connect to a peer given a remote address.

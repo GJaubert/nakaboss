@@ -10,7 +10,7 @@ license = "MIT"
 
 [dependencies]
 nakamoto-net = { version = "0.4.0", path = ".." }
-nakamoto-common = { version = "0.4.0", path = "../../common" }
+nakamoto-p2p = { version = "0.4.0", path = "../../p2p" }
 crossbeam-channel = { version = "0.5.6" }
 popol = { version = "2" }
 socket2 = { version = "0.4" }

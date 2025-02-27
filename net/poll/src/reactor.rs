@@ -507,19 +507,19 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             }
                         } else {
                             if let Some(packet_handler) = &mut bip324_info.packet_handler {
-                                println!("Decrypting {} {:?}", count, &buffer[..150]);
+                                //println!("Decrypting {} {:?}", count, &buffer[..count]);
                                 // ignorar decoy
                                 let message = &buffer[..count];
                                 let mut pending_bytes = bip324_info.pending_bytes;
                                 let mut index = 0;
                                 let mut current_buffer = vec![];
                                 let mut result_buffer = vec![];
-                                println!("Amount to decrypt: {} {}", count, message.len());
+                                //println!("Amount to decrypt: {} {}", count, message.len());
                                 // emptying pending message
 
                                 if pending_bytes > 0 {
                                     if pending_bytes <= count {
-                                        println!("Pending bytes: {}", pending_bytes);
+                                        //println!("Pending bytes: {}", pending_bytes);
                                         bip324_info.message_buffer.extend(message[..pending_bytes].to_vec());
                                         let result_message = packet_handler.reader().decrypt_payload(bip324_info.message_buffer.clone()[..].try_into().unwrap(), None).unwrap();
                                         result_buffer.extend_from_slice(&result_message.contents());
@@ -527,41 +527,41 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                         bip324_info.pending_bytes = 0;
                                         index = pending_bytes;
                                     } else {
-                                        println!("Cannot finish message");
+                                        //println!("Cannot finish message");
                                         bip324_info.message_buffer.extend(message.to_vec());
                                         pending_bytes = pending_bytes - count;
                                     }
                                 }
 
                                 while index < count {
-                                    println!("{} index before length: {}", socket_addr, index);
+                                    //println!("{} index before length: {}", socket_addr, index);
                                     for i in index..index+DEFAULT_SIZE_BYTES_V2 {
                                         current_buffer.push(message[i]);
                                     }
                                     index += DEFAULT_SIZE_BYTES_V2;
-                                    println!("{} buffer length before length: {}", socket_addr, current_buffer.len());
-                                    println!("{} buffer length: {:?}", socket_addr, current_buffer);
+                                    //println!("{} buffer length before length: {}", socket_addr, current_buffer.len());
+                                    //println!("{} buffer length: {:?}", socket_addr, current_buffer);
                                     let length = packet_handler.reader().decypt_len(current_buffer[..].try_into().unwrap());
-                                    println!("{} length: {}", socket_addr, length);
+                                    //println!("{} length: {}", socket_addr, length);
                                     current_buffer.clear();
                                     let mut finish = index + length;
                                     if finish > count {
                                         bip324_info.pending_bytes = finish - count;
                                         bip324_info.message_buffer.extend(message[index..].to_vec());
-                                        println!("Writing pending bytes: {}", bip324_info.pending_bytes);
+                                        //println!("Writing pending bytes: {}", bip324_info.pending_bytes);
                                         break;
                                     } else {
                                         for i in index..finish {
                                             current_buffer.push(message[i]);
                                         }
-                                        println!("{} buffer length before reading: {}", socket_addr, current_buffer.len());
+                                        //println!("{} buffer length before reading: {}", socket_addr, current_buffer.len());
                                         index += length;
                                         let result_message = packet_handler.reader().decrypt_payload(current_buffer[..].try_into().unwrap(), None).unwrap();
                                         result_buffer.extend(result_message.contents());
-                                        println!("index final: {}", index);
+                                        //println!("index final: {}", index);
                                     }
                                     current_buffer.clear();
-                                    println!("{} index before read: {}", socket_addr, index);
+                                    //println!("{} current result size: {}", socket_addr, result_buffer.len());
                                 }
                                 service.message_received(&addr, Cow::Borrowed(&result_buffer));
                             } else {

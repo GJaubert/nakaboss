@@ -238,7 +238,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                             }
                             Source::Listener => loop {
                                 if let Some(ref listener) = listener {
-                                    let (conn, socket_addr) = match listener.accept() {
+                                    let (mut conn, socket_addr) = match listener.accept() {
                                         Ok((conn, socket_addr)) => (conn, socket_addr),
                                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                                             break;
@@ -256,7 +256,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
                                     let local_addr = conn.local_addr()?;
                                     let link = Link::Inbound;
 
-                                    self.register_peer(addr.clone(), conn, link);
+                                    self.register_peer(addr.clone(), conn.try_clone()?, link);
                                     service.connected(addr.clone(), &local_addr, link);
                                 }
                             },
@@ -326,7 +326,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 if let Some(bip324_info) = &mut self.bip324_info.get_mut(&addr) {
                     if bip324_info.key_sent.is_some()
                         && bip324_info.key_received.is_some()
-                        && bip324_info.terminator_received.is_some()
+                        && bip324_info.terminator_sent.is_some()
                         && bip324_info.terminator_received.is_some() {
                         // Tambien añadir que compruebe que hay handshake. De esta manera puedo eliminar el
                         // flush del handle readable
@@ -368,7 +368,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             if let Some(bip324_info) = &mut self.bip324_info.get_mut(&addr) {
                                 if bip324_info.key_sent.is_some()
                                     && bip324_info.key_received.is_some()
-                                    && bip324_info.terminator_received.is_some()
+                                    && bip324_info.terminator_sent.is_some()
                                     && bip324_info.terminator_received.is_some() { // And v2 == true && bip324_info.packet_handler.is_some()
                                     if let Some(packet_handler) = &mut bip324_info.packet_handler {
                                         let packet = packet_handler.writer().encrypt_packet(bytes.clone().as_slice(), None, PacketType::Genuine).unwrap();
@@ -398,12 +398,11 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             trace!("{:#?}", stream);
                             self.register_peer(addr.clone(), stream.try_clone().unwrap(), Link::Outbound);
                             self.connecting.insert(addr.clone());
-                            // println!("registering: {:?}", self.peers);
 
                             let mut ellswift_buffer = vec![0u8; 64];
                             match Handshake::new(Network::Regtest, Role::Initiator, None, &mut ellswift_buffer) {
                                 Ok(handshake) => {
-                                    //println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                    println!("Sending key to {:?}: {:?}", socket_addr,  ellswift_buffer);
 
                                     let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
                                     bip324_info.key_sent = Some(ellswift_buffer.to_vec());
@@ -470,32 +469,54 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
             // Hence, there is no use in putting this socket read in a loop, as the second
             // invocation would likely block.
             match socket.read(&mut buffer) {
-                Ok(count) => {
-                    if count > 0 {
+                Ok(mut count) => {
+                    if count <= 0 {
+                        trace!("{}: Read 0 bytes", socket_addr);
+                        // If we get zero bytes read as a return value, it means the peer has
+                        // performed an orderly shutdown.
+                        socket.disconnect().ok();
+                        self.unregister_peer(
+                            addr.clone(),
+                            Disconnect::ConnectionError(Arc::new(io::Error::from(
+                                io::ErrorKind::ConnectionReset,
+                            ))),
+                            service,
+                        );
+                        return;
+                    }
+                    // While loop that handles cases in which buffer is [TERMINATOR + other_messages...]
+                    while count > 0 {
                         //println!("Reading {:?}", buffer[..count].to_vec());
                         trace!("{}: Read {} bytes", socket_addr, count);
-                        let bip324_info = self.bip324_info.get_mut(&addr).unwrap();
+                        let bip324_info = self.bip324_info.get_mut(&addr.clone()).unwrap();
                         if bip324_info.key_received.is_none() { // Añadir si es v2 y si hay packet handler
-                            //println!("Received key from {} {:?}", socket_addr, &buffer[..count]);
+                            println!("Received buffer from {} {:?}", socket_addr, &buffer[..count]);
+                            println!("Received key is{:?}", &buffer[..64]);
                             bip324_info.key_received = Some(buffer[..count].to_vec());
+                            count = 0;
 
-                            if bip324_info.key_sent.is_none() {
-                                let mut ellswift_buffer = vec![0u8; 64];
-                                match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
-                                    Ok(handshake) => {
-                                        //println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
-                                        bip324_info.key_sent = Some(ellswift_buffer.to_vec());
-                                        bip324_info.handshake = Some(Box::from(handshake));
-                                        socket.push(&ellswift_buffer);
-                                        socket.flush().expect("flushed");
-                                    },
-                                    Err(e) => {},
-                                };
+                            match socket.link {
+                                Link::Inbound => { let mut ellswift_buffer = vec![0u8; 64];
+                                    match Handshake::new(Network::Regtest, Role::Responder, None, &mut ellswift_buffer) {
+                                        Ok(handshake) => {
+                                            println!("Inbound: Sending back key to {:?}: {:?}", socket_addr,  ellswift_buffer);
+                                            bip324_info.key_sent = Some(ellswift_buffer.to_vec());
+                                            bip324_info.handshake = Some(Box::from(handshake));
+                                            socket.push(&ellswift_buffer);
+                                            socket.flush().expect("flushed");
+                                            println!("flushing key");
+                                        },
+                                        Err(e) => {},
+                                    };
+                                }
+                                Link::Outbound => Self::create_and_send_terminator(bip324_info, socket)
                             }
-                            Self::create_and_send_terminator(bip324_info, socket);
                         } else if bip324_info.terminator_received.is_none() {
-                            bip324_info.terminator_received = Some(buffer[..count].to_vec());
-                            // println!("Received: {:?}", bip324_info.terminator_received);
+                            if bip324_info.terminator_sent.is_none() {
+                                Self::create_and_send_terminator(bip324_info, socket);
+                            }
+                            bip324_info.terminator_received = Some(buffer[..36].to_vec());
+                            println!("Received terminator from: {} {:?}", socket_addr, bip324_info.terminator_received);
                             if let Some(mut handshake) = bip324_info.handshake.take() {
                                 let terminator_copy = bip324_info.terminator_received.clone().unwrap();
                                 if let Ok(()) = handshake.authenticate_garbage_and_version(
@@ -505,6 +526,9 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                     bip324_info.packet_handler = Some(handshake.finalize().expect("finalized"));
                                 }
                             }
+                            //Not 36, but the amount found like in proxy
+                            count -= 36;
+                            buffer.rotate_left(36);
                         } else {
                             if let Some(packet_handler) = &mut bip324_info.packet_handler {
                                 //println!("Decrypting {} {:?}", count, &buffer[..count]);
@@ -514,12 +538,12 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                 let mut index = 0;
                                 let mut current_buffer = vec![];
                                 let mut result_buffer = vec![];
-                                //println!("Amount to decrypt: {} {}", count, message.len());
+                                println!("Amount to decrypt: {} {}", socket_addr, message.len());
                                 // emptying pending message
 
                                 if pending_bytes > 0 {
                                     if pending_bytes <= count {
-                                        //println!("Pending bytes: {}", pending_bytes);
+                                        println!("Pending bytes: {}", pending_bytes);
                                         bip324_info.message_buffer.extend(message[..pending_bytes].to_vec());
                                         let result_message = packet_handler.reader().decrypt_payload(bip324_info.message_buffer.clone()[..].try_into().unwrap(), None).unwrap();
                                         result_buffer.extend_from_slice(&result_message.contents());
@@ -527,59 +551,50 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                         bip324_info.pending_bytes = 0;
                                         index = pending_bytes;
                                     } else {
-                                        //println!("Cannot finish message");
+                                        println!("Cannot finish message");
                                         bip324_info.message_buffer.extend(message.to_vec());
                                         pending_bytes = pending_bytes - count;
                                     }
                                 }
 
                                 while index < count {
-                                    //println!("{} index before length: {}", socket_addr, index);
+                                    println!("{} index before length: {}", socket_addr, index);
                                     for i in index..index+DEFAULT_SIZE_BYTES_V2 {
                                         current_buffer.push(message[i]);
                                     }
                                     index += DEFAULT_SIZE_BYTES_V2;
-                                    //println!("{} buffer length before length: {}", socket_addr, current_buffer.len());
+                                    println!("{} buffer length before length: {}", socket_addr, current_buffer.len());
                                     //println!("{} buffer length: {:?}", socket_addr, current_buffer);
                                     let length = packet_handler.reader().decypt_len(current_buffer[..].try_into().unwrap());
-                                    //println!("{} length: {}", socket_addr, length);
+                                    println!("{} length: {}", socket_addr, length);
                                     current_buffer.clear();
                                     let mut finish = index + length;
                                     if finish > count {
                                         bip324_info.pending_bytes = finish - count;
                                         bip324_info.message_buffer.extend(message[index..].to_vec());
-                                        //println!("Writing pending bytes: {}", bip324_info.pending_bytes);
+                                        println!("Writing pending bytes: {}", bip324_info.pending_bytes);
                                         break;
                                     } else {
                                         for i in index..finish {
                                             current_buffer.push(message[i]);
                                         }
-                                        //println!("{} buffer length before reading: {}", socket_addr, current_buffer.len());
+                                        println!("{} buffer length before reading: {}", socket_addr, current_buffer.len());
                                         index += length;
                                         let result_message = packet_handler.reader().decrypt_payload(current_buffer[..].try_into().unwrap(), None).unwrap();
                                         result_buffer.extend(result_message.contents());
-                                        //println!("index final: {}", index);
+                                        println!("index final: {}", index);
                                     }
                                     current_buffer.clear();
-                                    //println!("{} current result size: {}", socket_addr, result_buffer.len());
+                                    println!("{} current result size: {}", socket_addr, result_buffer.len());
                                 }
                                 service.message_received(&addr, Cow::Borrowed(&result_buffer));
+                                count = 0;
                             } else {
+                                println!("no packet handler");
                                 service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
+                                count = 0;
                             }
                         }
-                    } else {
-                        trace!("{}: Read 0 bytes", socket_addr);
-                        // If we get zero bytes read as a return value, it means the peer has
-                        // performed an orderly shutdown.
-                        socket.disconnect().ok();
-                        self.unregister_peer(
-                            addr,
-                            Disconnect::ConnectionError(Arc::new(io::Error::from(
-                                io::ErrorKind::ConnectionReset,
-                            ))),
-                            service,
-                        );
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -658,7 +673,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         socket.push(&terminator_and_version_buffer);
         socket.flush().expect("flushed");
         bip324_info.terminator_sent = Some(terminator_and_version_buffer.to_vec());
-        // println!("Sending terminator {:?}", terminator_and_version_buffer);
+        println!("Sending terminator to {} {:?}", socket.address, terminator_and_version_buffer);
     }
 
 }

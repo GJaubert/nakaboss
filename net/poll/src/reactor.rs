@@ -152,7 +152,7 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
             shutdown,
             listening,
             bip324_info,
-            is_v2: true,
+            is_v2: false,
         })
     }
 
@@ -358,7 +358,9 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                 source.set(popol::interest::WRITE);
                             } else {
                                 socket.push(&bytes);
+                                source.set(popol::interest::WRITE);
                             }
+
                         }
                     }
                 }
@@ -453,27 +455,29 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 },
                 Ok(mut count) => {
                     trace!("{}: Read {} bytes", socket_addr, count);
-                    let bip324_info = self.bip324_info.get_mut(&addr).unwrap();
+                    if let Some(bip324_info) = self.bip324_info.get_mut(&addr) {
+                        while count > 0 {
+                            if bip324_info.key_received.is_none() {
+                                bip324_info.key_received = Some(buffer[..count].to_vec());
 
-                    // Process incoming data
-                    while count > 0 {
-                        if bip324_info.key_received.is_none() {
-                            bip324_info.key_received = Some(buffer[..count].to_vec());
-
-                            match socket.link {
-                                Link::Inbound => {
-                                    Self::send_elli_swift(bip324_info, Role::Responder, &mut socket);
-                                },
-                                Link::Outbound => Self::create_and_send_terminator(bip324_info, socket)
+                                match socket.link {
+                                    Link::Inbound => {
+                                        Self::send_elli_swift(bip324_info, Role::Responder, &mut socket);
+                                    },
+                                    Link::Outbound => Self::create_and_send_terminator(bip324_info, socket)
+                                }
+                                count = 0;
+                            } else if bip324_info.terminator_received.is_none() {
+                                Self::handle_terminator_exchange(&mut buffer, &mut count, bip324_info, socket);
+                            } else {
+                                Self::handle_encrypted_message(&buffer, count, bip324_info, &addr, service);
+                                count = 0;
                             }
-                            count = 0;
-                        } else if bip324_info.terminator_received.is_none() {
-                            Self::handle_terminator_exchange(&mut buffer, &mut count, bip324_info, socket);
-                        } else {
-                            Self::handle_encrypted_message(&buffer, count, bip324_info, &addr, service);
-                            count = 0;
                         }
+                    } else {
+                        service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
                     }
+
                 },
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     // This shouldn't normally happen, since this function is only called
@@ -539,7 +543,9 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                         bip324_info.message_buffer.buffer.clone()[..].try_into().unwrap(),
                         None
                     ) {
-                        result_buffer.extend_from_slice(&result_message.contents());
+                        if result_message.packet_type() == PacketType::Genuine {
+                            result_buffer.extend_from_slice(&result_message.contents());
+                        }
                     }
 
                     bip324_info.message_buffer.buffer.clear();

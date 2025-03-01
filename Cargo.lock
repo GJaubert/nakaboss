@@ -717,6 +717,7 @@ dependencies = [
  "fastrand",
  "libc",
  "log",
+ "nakamoto-common",
  "nakamoto-net",
  "nakamoto-p2p",
  "popol",
@@ -735,6 +736,7 @@ dependencies = [
  "colored",
  "log",
  "nakamoto-client",
+ "nakamoto-common",
  "nakamoto-net-poll",
  "thiserror 1.0.37",
 ]

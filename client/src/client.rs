@@ -70,6 +70,8 @@ pub struct Config {
     pub services: ServiceFlags,
     /// Configured limits.
     pub limits: Limits,
+    /// P2P_v2
+    pub p2p_v2: bool
 }
 
 /// Configuration for loading event handling.
@@ -126,6 +128,7 @@ impl Default for Config {
             hooks: Hooks::default(),
             limits: Limits::default(),
             services: ServiceFlags::NONE,
+            p2p_v2: false,
         }
     }
 }
@@ -249,7 +252,7 @@ impl<R: Reactor> Client<R> {
     /// Load the client configuration. Takes a loading handler that can optionally receive
     /// loading events.
     pub fn load(
-        self,
+        mut self,
         config: Config,
         loading: impl Into<LoadingHandler>,
     ) -> Result<ClientRunner<R>, Error> {
@@ -379,6 +382,8 @@ impl<R: Reactor> Client<R> {
             log::info!(target: "client", "{} seeds added to address book", peers.len());
         }
 
+        self.reactor.configure_network(config.network.to_str(), config.p2p_v2);
+
         Ok(ClientRunner {
             listen,
             commands: self.commands,
@@ -412,6 +417,11 @@ impl<R: Reactor> Client<R> {
     /// Create a new handle to communicate with the client.
     pub fn handle(&self) -> Handle<R::Waker> {
         self.handle.clone()
+    }
+
+    /// Configures network and p2p version used by the client
+    pub fn configure_network(&mut self, network: String, is_v2: bool) {
+        self.reactor.configure_network(network, is_v2);
     }
 }
 

@@ -96,6 +96,16 @@ impl Network {
         }
     }
 
+    /// Converts the network to String
+    pub fn to_str(self) -> String {
+        match self {
+            Network::Mainnet => String::from("mainnet"),
+            Network::Testnet => String::from("testnet"),
+            Network::Regtest => String::from("regtest"),
+            Network::Signet => String::from("signet"),
+        }
+    }
+
     /// Blockchain checkpoints.
     pub fn checkpoints(&self) -> Box<dyn Iterator<Item = (Height, BlockHash)>> {
         use crate::block::checkpoints;

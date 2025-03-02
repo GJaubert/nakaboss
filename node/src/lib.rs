@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 pub use nakamoto_client::{Client, Config, Error, Network};
 pub use nakamoto_client::{Domain, LoadingHandler};
+pub use nakamoto_common::bitcoin::p2p::ServiceFlags;
 
 pub mod logger;
 
@@ -31,6 +32,7 @@ pub fn run(
         } else {
             listen.to_vec()
         },
+        p2p_v2,
         ..Config::default()
     };
     if let Some(path) = root {
@@ -38,6 +40,9 @@ pub fn run(
     }
     if !connect.is_empty() {
         cfg.limits.max_outbound_peers = connect.len();
+    }
+    if p2p_v2 {
+        cfg.services = cfg.services | ServiceFlags::P2P_V2;
     }
 
     Client::<Reactor>::new()?.run(cfg)

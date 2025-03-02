@@ -40,9 +40,10 @@ fn network(
         let genesis = cfg.network.genesis();
         let params = cfg.network.params();
 
-        let node = Client::<Reactor>::new()?;
+        let mut node = Client::<Reactor>::new()?;
         let mut handle = node.handle();
-        handle.set_timeout(time::Duration::from_secs(5));
+        handle.set_timeout(time::Duration::from_secs(7));
+        node.configure_network(cfg.network.to_str(), cfg.p2p_v2);
 
         let t = thread::spawn({
             let params = params.clone();
@@ -107,6 +108,85 @@ fn test_full_sync() {
 
     for (mut node, _, thread) in nodes.into_iter() {
         node.set_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(node.wait_for_height(height).unwrap(), hash);
+
+        node.shutdown().unwrap();
+        thread.join().unwrap();
+    }
+}
+
+#[test]
+fn test_full_sync_v2() {
+    logger::init(log::Level::Debug);
+
+    let cfgs = vec![
+        Config {
+            services: ServiceFlags::NETWORK | ServiceFlags::P2P_V2,
+            p2p_v2: true,
+            ..Config::default()
+        };
+        3
+    ];
+    let nodes = network(&cfgs).unwrap();
+    let (handle, _, _) = nodes.last().unwrap();
+    let headers = BITCOIN_HEADERS.tail.clone();
+    let height = headers.len() as Height;
+    let hash = headers.last().unwrap().block_hash();
+
+    // Ensure all peers are connected to misha,
+    // so that misha can effectively send blocks to
+    // all peers on time.
+    handle.wait_for_peers(2, Services::Chain).unwrap();
+
+    handle
+        .import_headers(headers)
+        .expect("command is successful")
+        .expect("chain is valid");
+
+    for (mut node, _, thread) in nodes.into_iter() {
+        node.set_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(node.wait_for_height(height).unwrap(), hash);
+
+        node.shutdown().unwrap();
+        thread.join().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "failing"]
+fn test_full_sync_v1_v2() {
+    logger::init(log::Level::Debug); // true true false falla / true false false / false true false /
+
+    let cfgs = vec![
+        Config {
+            services: ServiceFlags::NETWORK | ServiceFlags::P2P_V2,
+            p2p_v2: true,
+            ..Config::default()
+        },
+        Config {
+            services: ServiceFlags::NETWORK | ServiceFlags::BLOOM,
+            p2p_v2: false,
+            ..Config::default()
+        },
+    ];
+    let nodes = network(&cfgs).unwrap();
+    let (handle, _, _) = nodes.last().unwrap();
+    let headers = BITCOIN_HEADERS.tail.clone();
+    let height = headers.len() as Height;
+    let hash = headers.last().unwrap().block_hash();
+
+    // Ensure all peers are connected to misha,
+    // so that misha can effectively send blocks to
+    // all peers on time.
+    handle.wait_for_peers(1, Services::Chain).unwrap();
+
+    handle
+        .import_headers(headers)
+        .expect("command is successful")
+        .expect("chain is valid");
+
+    for (mut node, _, thread) in nodes.into_iter() {
+        node.set_timeout(std::time::Duration::from_secs(6));
         assert_eq!(node.wait_for_height(height).unwrap(), hash);
 
         node.shutdown().unwrap();

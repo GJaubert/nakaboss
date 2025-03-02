@@ -29,6 +29,10 @@ pub struct Options {
     #[argh(switch)]
     pub regtest: bool,
 
+    /// use P2P v2
+    #[argh(switch)]
+    pub p2p_v2: bool,
+
     /// only connect to IPv4 addresses (default: false)
     #[argh(switch, short = '4')]
     pub ipv4: bool,

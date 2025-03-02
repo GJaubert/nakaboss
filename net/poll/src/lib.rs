@@ -34,6 +34,7 @@ pub mod time;
 
 pub use reactor::{Reactor, Waker};
 
+mod bip324_info;
 #[cfg(test)]
 mod fallible;
 

@@ -489,7 +489,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         // Nb. If the socket was readable and writable at the same time, and it was disconnected
         // during an attempt to write, it will no longer be registered and hence available
         // for reads.
-        if let Some(mut socket) = self.peers.get_mut(&addr) {
+        if let Some(socket) = self.peers.get_mut(&addr) {
             let mut buffer = [0; READ_BUFFER_SIZE];
 
             let socket_addr = addr.to_socket_addr();
@@ -501,7 +501,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
             // invocation would likely block.
 
             match socket.read(&mut buffer) {
-                Ok(count) if count <= 0 => {
+                Ok(0) => {
                     trace!("{}: Read 0 bytes", socket_addr);
                     // Peer has performed an orderly shutdown
                     socket.disconnect().ok();
@@ -512,7 +512,6 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                         ))),
                         service,
                     );
-                    return;
                 }
                 Ok(mut count) => {
                     trace!("{}: Read {} bytes", socket_addr, count);
@@ -535,7 +534,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                     Self::send_elli_swift(
                                         bip324_info,
                                         Role::Responder,
-                                        &mut socket,
+                                        socket,
                                         LocalTime::now(),
                                     );
                                 }
@@ -648,7 +647,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                         None,
                     ) {
                         if result_message.packet_type() == PacketType::Genuine {
-                            result_buffer.extend_from_slice(&result_message.contents());
+                            result_buffer.extend_from_slice(result_message.contents());
                         }
                     }
 
@@ -673,9 +672,9 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 }
 
                 let mut current_buffer = vec![];
-                for i in index..index + bip324_info::DEFAULT_SIZE_BYTES_V2 {
-                    current_buffer.push(message[i]);
-                }
+
+                current_buffer
+                    .extend_from_slice(&message[index..index + bip324_info::DEFAULT_SIZE_BYTES_V2]);
 
                 let length = packet_handler
                     .reader()
@@ -693,15 +692,13 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                         .extend_from_slice(&message[next_index..count]);
                     break;
                 } else {
-                    for i in next_index..finish {
-                        current_buffer.push(message[i]);
-                    }
+                    current_buffer.extend_from_slice(&message[next_index..finish]);
 
                     if let Ok(result_message) = packet_handler
                         .reader()
                         .decrypt_payload(current_buffer[..].try_into().unwrap(), None)
                     {
-                        result_buffer.extend_from_slice(&result_message.contents());
+                        result_buffer.extend_from_slice(result_message.contents());
                     }
 
                     index = finish;
@@ -724,17 +721,14 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         time: LocalTime,
     ) {
         let mut elli_swift_buffer = vec![0u8; 64];
-        match Handshake::new(Network::Regtest, role, None, &mut elli_swift_buffer) {
-            Ok(handshake) => {
-                bip324_info.key_sent = Some(elli_swift_buffer.to_vec());
-                bip324_info.handshake = Some(Box::from(handshake));
-                bip324_info.handshake_started = Some(time);
+        if let Ok(handshake) = Handshake::new(Network::Regtest, role, None, &mut elli_swift_buffer)
+        {
+            bip324_info.key_sent = Some(elli_swift_buffer.to_vec());
+            bip324_info.handshake = Some(Box::from(handshake));
+            bip324_info.handshake_started = Some(time);
 
-                socket.push(&elli_swift_buffer);
-                socket.flush().unwrap_or({});
-            }
-            Err(_) => {}
-        };
+            socket.push(&elli_swift_buffer);
+        }
     }
 
     fn create_and_send_terminator(bip324_info: &mut Bip324Info, socket: &mut Socket<TcpStream>) {
@@ -791,7 +785,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             socket.push(bytes);
                             socket.flush().expect("flushed");
                             source.set(popol::interest::WRITE);
-                            return false;
+                            false
                         }
                         _ => true,
                     });
@@ -806,7 +800,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
     fn filter_io_queue(&mut self, io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>) {
         io_queue.retain(|io| match io {
             Io::Write(addr, bytes) => {
-                let socket = match self.peers.get_mut(&addr) {
+                let socket = match self.peers.get_mut(addr) {
                     Some(socket) => socket,
                     None => return false,
                 };
@@ -816,7 +810,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                     None => return false,
                 };
 
-                if let Some(bip324_info) = &mut self.bip324_info.get_mut(&addr) {
+                if let Some(bip324_info) = &mut self.bip324_info.get_mut(addr) {
                     if let Some(packet_handler) = &mut bip324_info.packet_handler {
                         let packet = packet_handler
                             .writer()
@@ -825,14 +819,14 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
 
                         socket.push(&packet);
                         source.set(popol::interest::WRITE);
-                        return false;
+                        false
                     } else {
                         true
                     }
                 } else {
-                    socket.push(&bytes);
+                    socket.push(bytes);
                     source.set(popol::interest::WRITE);
-                    return false;
+                    false
                 }
             }
             _ => false,

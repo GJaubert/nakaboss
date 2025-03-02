@@ -42,7 +42,7 @@ pub fn run(
         cfg.limits.max_outbound_peers = connect.len();
     }
     if p2p_v2 {
-        cfg.services = cfg.services | ServiceFlags::P2P_V2;
+        cfg.services |= ServiceFlags::P2P_V2
     }
 
     Client::<Reactor>::new()?.run(cfg)

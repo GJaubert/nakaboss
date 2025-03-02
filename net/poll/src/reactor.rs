@@ -10,7 +10,7 @@ use nakamoto_net::{Link, Service};
 use log::*;
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::io;
 use std::io::prelude::*;
@@ -20,30 +20,22 @@ use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::time;
 use std::time::SystemTime;
-use bip324::{Handshake, Network, PacketHandler, PacketType, PacketWriter, Role};
+use bip324::{Handshake, Network, PacketType, PacketWriter, Role};
 use nakamoto_p2p::{DisconnectReason, Event};
 use crate::fallible;
 use crate::socket::Socket;
 use crate::time::TimeoutManager;
+use crate::bip324_info;
+use crate::bip324_info::Bip324Info;
 
 /// Maximum time to wait when reading from a socket.
-const READ_TIMEOUT: time::Duration = time::Duration::from_secs(6);
+const READ_TIMEOUT: time::Duration = time::Duration::from_secs(3);
 /// Maximum time to wait when writing to a socket.
 const WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(6);
 /// Maximum amount of time to wait for i/o.
 const WAIT_TIMEOUT: LocalDuration = LocalDuration::from_mins(60);
 /// Socket read buffer size.
 const READ_BUFFER_SIZE: usize = 1024 * 192;
-/// Version content is always empty for the current version of the protocol.
-const VERSION_CONTENT: [u8; 0] = [];
-/// Number of bytes for the garbage terminator.
-const GARBAGE_TERMINATOR_BYTES: usize = 16;
-/// Number of bytes used to indicate size when decrypting a message
-const DEFAULT_SIZE_BYTES_V2: usize = 3;
-/// Size of an ElliSwift key
-const ELLI_SWIFT_KEY_SIZE: usize = 64;
-// Duration after a P2P_V2 should fallback to V1
-const BIP324_HANDSHAKE_TIMEOUT: LocalDuration = LocalDuration::from_millis(100);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Source<Id: PeerId> {
@@ -69,24 +61,6 @@ impl nakamoto_net::Waker for Waker {
     }
 }
 
-#[derive(Default)]
-struct Bip324Info {
-    key_sent: Option<Vec<u8>>,
-    key_received: Option<Vec<u8>>,
-    terminator_sent: Option<Vec<u8>>,
-    terminator_received: Option<Vec<u8>>,
-    packet_handler: Option<PacketHandler>,
-    handshake: Option<Box<Handshake<'static>>>,
-    message_buffer: MessageBuffer,
-    handshake_started: Option<LocalTime>,
-}
-
-#[derive(Default)]
-struct MessageBuffer {
-    pending_bytes: usize,
-    buffer: Vec<u8>,
-}
-
 /// A single-threaded non-blocking reactor.
 pub struct Reactor<R: Write + Read, Id: PeerId = net::SocketAddr> {
     is_v2: bool,
@@ -98,7 +72,7 @@ pub struct Reactor<R: Write + Read, Id: PeerId = net::SocketAddr> {
     shutdown: chan::Receiver<()>,
     listening: chan::Sender<net::SocketAddr>,
     pub network: Network,
-    bip324_info: HashMap<Id, Bip324Info>,
+    bip324_info: HashMap<Id, bip324_info::Bip324Info>,
 }
 
 /// The `R` parameter represents the underlying stream type, eg. `net::TcpStream`.
@@ -208,9 +182,14 @@ impl<Id: PeerId> nakamoto_net::Reactor<Id> for Reactor<net::TcpStream, Id> {
         let local_time = SystemTime::now().into();
         service.initialize(local_time);
 
-        info!(target: "reactor", "P2P_V2 mode: {} on network: {}", self.is_v2, self.network);
+        info!(
+            target: "reactor",
+            "P2P mode: v{} running on network: {}",
+            if self.is_v2 { "2" } else { "1" },
+            self.network
+        );
 
-        let mut io_queue: VecDeque<Io<Vec<u8>, Event, DisconnectReason, Id>> = VecDeque::new();
+        let mut io_queue: Vec<Io<Vec<u8>, Event, DisconnectReason, Id>> = Vec::new();
         self.process(&mut service, &mut publisher, local_time, &mut io_queue);
 
         // I/O readiness events populated by `popol::Sources::wait_timeout`.
@@ -355,7 +334,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         service: &mut S,
         publisher: &mut E,
         local_time: LocalTime,
-        io_queue: &mut VecDeque<Io<Vec<u8>, Event, DisconnectReason, Id>>
+        io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>
     )
     where
         S: Service<Id>,
@@ -387,7 +366,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                                         .unwrap();
                                     socket.push(&packet);
                                 } else {
-                                    io_queue.push_back(Io::Write(addr, bytes));
+                                    io_queue.push(Io::Write(addr, bytes));
                                 }
                                 source.set(popol::interest::WRITE);
                             } else {
@@ -539,39 +518,44 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                 Ok(mut count) => {
                     trace!("{}: Read {} bytes", socket_addr, count);
                     if let Some(bip324_info) = self.bip324_info.get_mut(&addr) {
-                        //println!("Treating as V2");
                         while count > 0 {
                             if bip324_info.key_received.is_none() {
                                 if self.network.magic()
                                     == nakamoto_common::bitcoin::p2p::Magic::from_bytes(
                                     buffer[..4].try_into().expect("first 4 bytes"),
                                 ) {
-                                    //println!("Rolling back to V1 for address {:?}", &addr);
                                     self.bip324_info.remove(&addr);
                                     service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
                                     return;
                                 }
-                                bip324_info.key_received = Some(buffer[..ELLI_SWIFT_KEY_SIZE].to_vec());
-
-                                match socket.link {
-                                    Link::Inbound => {
-                                        Self::send_elli_swift(
-                                            bip324_info,
-                                            Role::Responder,
-                                            &mut socket,
-                                            LocalTime::now()
-                                        );
-                                    },
-                                    Link::Outbound => Self::create_and_send_terminator(bip324_info, socket)
+                                bip324_info.key_received = Some(buffer[..bip324_info::ELLI_SWIFT_KEY_SIZE].to_vec());
+                                if socket.link == Link::Inbound {
+                                    Self::send_elli_swift(
+                                        bip324_info,
+                                        Role::Responder,
+                                        &mut socket,
+                                        LocalTime::now()
+                                    );
                                 }
-                                count -= count.min(4096);
-                            } else if bip324_info.terminator_received.is_none() {
-                                Self::handle_terminator_exchange(
+                                Self::create_and_send_terminator(bip324_info, socket);
+                                count -= bip324_info::ELLI_SWIFT_KEY_SIZE;
+                                buffer.rotate_left(bip324_info::ELLI_SWIFT_KEY_SIZE);
+                            } else if bip324_info.garbage_received.len() < bip324_info::MAX_GARBAGE_BUFFER_BYTES
+                            && bip324_info.packet_handler.is_none() {
+                                match Self::handle_garbage(
                                     &mut buffer,
                                     &mut count,
-                                    bip324_info,
-                                    socket
-                                );
+                                    bip324_info
+                                ) {
+                                    Ok(()) => {
+                                        info!(target: "reactor", "handshake done with {}", socket_addr);
+                                    },
+                                    Err(bip324::Error::CiphertextTooSmall) => {}
+                                    Err(_) => {
+                                        self.bip324_info.remove(&addr);
+                                        break;
+                                    }
+                                }
                             } else {
                                 Self::handle_encrypted_message(
                                     &buffer,
@@ -584,7 +568,6 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                             }
                         }
                     } else {
-                        //println!("Reading bytes from addr {:?} {:?}", &addr, &buffer[..count]);
                         service.message_received(&addr, Cow::Borrowed(&buffer[..count]));
                     }
 
@@ -603,30 +586,36 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         }
     }
 
-    fn handle_terminator_exchange(
+    fn handle_garbage(
         buffer: &mut [u8],
         count: &mut usize,
         bip324_info: &mut Bip324Info,
-        socket: &mut Socket<TcpStream>,
-    ) {
-        if bip324_info.terminator_sent.is_none() {
-            Self::create_and_send_terminator(bip324_info, socket);
-        }
-
-        bip324_info.terminator_received = Some(buffer[..36].to_vec());
+    ) -> Result<(), bip324::Error> {
+        let reading_bytes_number = bip324_info::MAX_GARBAGE_BUFFER_BYTES.min(*count);
+        bip324_info.garbage_received.extend(buffer[..reading_bytes_number].to_vec());
 
         if let Some(mut handshake) = bip324_info.handshake.take() {
-            let terminator_copy = bip324_info.terminator_received.clone().unwrap();
-            if handshake.authenticate_garbage_and_version(&terminator_copy).is_ok() {
-                bip324_info.packet_handler = handshake
-                    .finalize()
-                    .ok()
-                    .map(|handler| handler);
+            return match handshake.authenticate_garbage_and_version(&bip324_info.garbage_received) {
+                Ok(()) => {
+                    bip324_info.packet_handler = Some(handshake.finalize()?);
+                    *count -= reading_bytes_number;
+                    buffer.rotate_left(reading_bytes_number);
+                    Ok(())
+                }
+                Err(bip324::Error::CiphertextTooSmall) => {
+                    *count -= reading_bytes_number;
+                    // remove rotate left to optimize
+                    buffer.rotate_left(reading_bytes_number);
+                    Err(bip324::Error::CiphertextTooSmall)
+                }
+                Err(_) => Err(bip324::Error::HandshakeOutOfOrder)
             }
         }
-
-        *count -= 36;
-        buffer.rotate_left(36);
+        if bip324_info.garbage_received.len() < bip324_info::MAX_GARBAGE_BUFFER_BYTES {
+            Err(bip324::Error::CiphertextTooSmall)
+        } else {
+            Err(bip324::Error::TooMuchGarbage)
+        }
     }
 
     fn handle_encrypted_message<S>(
@@ -668,21 +657,21 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
             }
 
             while index < count {
-                if index + DEFAULT_SIZE_BYTES_V2 > count {
+                if index + bip324_info::DEFAULT_SIZE_BYTES_V2 > count {
                     bip324_info.message_buffer.pending_bytes = count - index;
                     bip324_info.message_buffer.buffer.extend_from_slice(&message[index..count]);
                     break;
                 }
 
                 let mut current_buffer = vec![];
-                for i in index..index+DEFAULT_SIZE_BYTES_V2 {
+                for i in index..index+bip324_info::DEFAULT_SIZE_BYTES_V2 {
                     current_buffer.push(message[i]);
                 }
 
                 let length = packet_handler.reader().decypt_len(current_buffer[..].try_into().unwrap());
                 current_buffer.clear();
 
-                let next_index = index + DEFAULT_SIZE_BYTES_V2;
+                let next_index = index + bip324_info::DEFAULT_SIZE_BYTES_V2;
                 let finish = next_index + length;
 
                 if finish > count {
@@ -735,11 +724,10 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         };
     }
 
-    // Create and push garbage terminator
     fn create_and_send_terminator(bip324_info: &mut Bip324Info, socket: &mut Socket<TcpStream>) {
-        let num_version_packet_bytes = PacketWriter::required_packet_allocation(&VERSION_CONTENT);
+        let num_version_packet_bytes = PacketWriter::required_packet_allocation(&bip324_info::VERSION_CONTENT);
         let mut terminator_and_version_buffer =
-            vec![0u8; GARBAGE_TERMINATOR_BYTES + num_version_packet_bytes];
+            vec![0u8; bip324_info::GARBAGE_TERMINATOR_BYTES + num_version_packet_bytes];
         if let Some(handshake) = &mut bip324_info.handshake {
             handshake.complete_materials(
                 bip324_info.key_received.clone().unwrap().try_into().unwrap(),
@@ -755,40 +743,37 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
     fn check_and_handle_handshake_timeouts(
         &mut self,
         local_time: LocalTime,
-        io_queue: &mut VecDeque<Io<Vec<u8>, Event, DisconnectReason, Id>>,
+        io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>,
     ) {
         let mut fallback_peers = Vec::new();
 
-        self.bip324_info.retain(|addr, bip324_info| {
+        for (addr, bip324_info) in &mut self.bip324_info {
             if bip324_info.key_received.is_some() || bip324_info.handshake_started.is_none() {
-                true;
+                continue;
             }
 
             let started_at = bip324_info.handshake_started.unwrap();
             let elapsed = local_time - started_at;
 
-            if elapsed >= BIP324_HANDSHAKE_TIMEOUT {
+            if elapsed >= bip324_info::BIP324_HANDSHAKE_TIMEOUT {
                 fallback_peers.push(addr.clone());
-                return false;
             }
-            true
-        });
+        };
 
         for addr in fallback_peers {
             if let Some(socket) = self.peers.get_mut(&addr) {
                 if let Some(source) = self.sources.get_mut(&Source::Peer(addr.clone())) {
                     self.bip324_info.remove(&addr);
 
-                    for io in io_queue.iter() {
-                        if let Io::Write(io_addr, bytes) = io {
-                            if io_addr == &addr {
-                                //println!("sending message {:?}", &bytes);
-                                socket.push(bytes);
-                                socket.flush().expect("flushed");
-                                source.set(popol::interest::WRITE);
-                            }
+                    io_queue.retain(|io| match io {
+                        Io::Write(io_addr, bytes) if io_addr == &addr => {
+                            socket.push(bytes);
+                            socket.flush().expect("flushed");
+                            source.set(popol::interest::WRITE);
+                            return false;
                         }
-                    }
+                        _ => true
+                    });
 
                     info!(target: "net", "{}: Fallback to v1 protocol after handshake timeout",
                      addr.to_socket_addr());
@@ -797,7 +782,7 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
         }
     }
 
-    fn filter_io_queue(&mut self, io_queue: &mut VecDeque<Io<Vec<u8>, Event, DisconnectReason, Id>>) {
+    fn filter_io_queue(&mut self, io_queue: &mut Vec<Io<Vec<u8>, Event, DisconnectReason, Id>>) {
         io_queue.retain(|io| match io {
             Io::Write(addr, bytes) => {
                 let socket = match self.peers.get_mut(&addr) {
@@ -828,7 +813,6 @@ impl<Id: PeerId> Reactor<net::TcpStream, Id> {
                         true
                     }
                 } else {
-                    //println!("sending message {:?}", &bytes);
                     socket.push(&bytes);
                     source.set(popol::interest::WRITE);
                     return false;
